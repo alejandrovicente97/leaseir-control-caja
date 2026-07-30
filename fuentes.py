@@ -116,11 +116,32 @@ COLS_BANCO = ["cuenta", "saldo", "tipo", "limite"]
 COLS_MOV = ["cuenta", "fecha", "importe", "concepto"]
 
 
+def _clave(k: str) -> str:
+    """paymentsPending, payments_pending y PaymentsPending son la misma cosa."""
+    return re.sub(r"[^a-z0-9]", "", str(k).lower())
+
+
 def _pri(d: dict, *claves, defecto=None):
-    """Primer valor no vacio de una lista de claves candidatas."""
-    for k in claves:
-        if k in d and d[k] not in (None, "", []):
-            return d[k]
+    """
+    Primer valor no vacio de una lista de claves candidatas, comparando sin
+    distinguir mayusculas ni guiones bajos.
+
+    Hace falta porque la API v1 de Holded devuelve camelCase (paymentsPending)
+    y la v2 snake_case (payments_pending). Sin esto, contra la v2 no se
+    encontraba lo cobrado y TODA factura salia como pendiente: el dashboard
+    daba 28 millones de pendiente de cobro en vez de un millon.
+    """
+    idx = getattr(d, "_idx_leaseir", None)
+    if idx is None:
+        idx = {_clave(k): k for k in d}
+        try:
+            d._idx_leaseir = idx
+        except AttributeError:
+            pass
+    for c in claves:
+        real = idx.get(_clave(c))
+        if real is not None and d[real] not in (None, "", []):
+            return d[real]
     return defecto
 
 
@@ -142,22 +163,28 @@ def desde_holded(ruta: Path) -> dict:
         if isinstance(c, dict):
             cid = _pri(c, "id", "_id")
             if cid:
-                contactos[cid] = _pri(c, "name", "tradeName", "legalName", defecto="")
+                contactos[cid] = _pri(c, "name", "tradeName", "legalName",
+                                      "socialName", defecto="")
 
     def documentos(clave, signo=1):
         filas = []
         for doc in d.get(clave, []) or []:
             if not isinstance(doc, dict):
                 continue
-            total = num(_pri(doc, "total", "totalAmount", "amount", defecto=0)) * signo
-            cobrado = num(_pri(doc, "paymentsTotal", "paid", "paidAmount", defecto=0)) * signo
+            total = num(_pri(doc, "total", "totalAmount", "totalWithTax", "amount",
+                             "grandTotal", defecto=0)) * signo
+            cobrado = num(_pri(doc, "paymentsTotal", "paidAmount", "paid",
+                               "amountPaid", "collectedAmount", defecto=0)) * signo
             # Holded suele dar el pendiente ya calculado: es mas fiable que restar
-            pend_api = _pri(doc, "paymentsPending", "pending", "pendingAmount")
+            pend_api = _pri(doc, "paymentsPending", "pendingAmount", "pending",
+                            "amountPending", "outstandingAmount", "dueAmount")
             pendiente = num(pend_api) * signo if pend_api is not None else total - cobrado
 
-            venc = a_fecha(_pri(doc, "dueDate", "duedate", "date"))
-            emision = a_fecha(_pri(doc, "date", "issuedDate", "createdAt"))
-            f_liq = a_fecha(_pri(doc, "paymentDate", "paidDate", "lastPaymentDate"))
+            venc = a_fecha(_pri(doc, "dueDate", "expirationDate", "date", "issueDate"))
+            emision = a_fecha(_pri(doc, "date", "issueDate", "issuedDate",
+                                   "documentDate", "createdAt"))
+            f_liq = a_fecha(_pri(doc, "paymentDate", "paidDate", "lastPaymentDate",
+                                 "collectionDate", "settledAt"))
             # si esta cobrada del todo y no hay fecha de cobro, vale el vencimiento
             if f_liq is None and abs(pendiente) < 0.01 and abs(total) > 0.01:
                 f_liq = venc
@@ -175,10 +202,14 @@ def desde_holded(ruta: Path) -> dict:
                 tags if isinstance(tags, str) else "")
 
             filas.append({
-                "num":         _pri(doc, "docNumber", "invoiceNum", "number", "id", defecto=""),
-                "tercero":     _pri(doc, "contactName", "contact_name",
-                                    defecto=contactos.get(_pri(doc, "contact", "contactId"), "")),
-                "cuenta":      str(_pri(doc, "desc", "description", "notes", defecto=""))[:90],
+                "num":         _pri(doc, "docNumber", "documentNumber", "invoiceNum",
+                                    "number", "id", defecto=""),
+                "tercero":     _pri(doc, "contactName", "contactLegalName", "clientName",
+                                    "supplierName",
+                                    defecto=contactos.get(
+                                        _pri(doc, "contact", "contactId"), "")),
+                "cuenta":      str(_pri(doc, "desc", "description", "notes",
+                                        "concept", defecto=""))[:90],
                 "fecha":       emision,
                 "vencimiento": venc,
                 "total":       total,
@@ -202,13 +233,15 @@ def desde_holded(ruta: Path) -> dict:
     for c in d.get("cuentas_tesoreria", []) or []:
         if not isinstance(c, dict):
             continue
-        nombre = _pri(c, "name", "alias", "description", defecto="(sin nombre)")
-        tipo_api = str(_pri(c, "type", "accountType", defecto="")).lower()
+        nombre = _pri(c, "name", "alias", "description", "accountName",
+                      defecto="(sin nombre)")
+        tipo_api = str(_pri(c, "type", "accountType", "kind", defecto="")).lower()
         es_poliza = ("poliz" in norm(nombre).lower() or "credit" in tipo_api
                      or "linea" in norm(nombre).lower())
         bancos.append({
             "cuenta": nombre,
-            "saldo": num(_pri(c, "balance", "currentBalance", "amount", defecto=0)),
+            "saldo": num(_pri(c, "balance", "currentBalance", "currentAmount",
+                              "amount", defecto=0)),
             "tipo": "poliza" if es_poliza else "cuenta",
             "limite": num(_pri(c, "creditLimit", "limit", defecto=0)),
         })
@@ -219,9 +252,9 @@ def desde_holded(ruta: Path) -> dict:
             continue
         movs.append({
             "cuenta": m.get("_cuenta_nombre"),
-            "fecha": a_fecha(_pri(m, "date", "valueDate", "createdAt")),
+            "fecha": a_fecha(_pri(m, "date", "valueDate", "operationDate", "createdAt")),
             "importe": num(_pri(m, "amount", "value", "total", defecto=0)),
-            "concepto": _pri(m, "description", "concept", "desc", defecto=""),
+            "concepto": _pri(m, "description", "concept", "desc", "notes", defecto=""),
         })
 
     sello = meta.get("extraido_en", "?")

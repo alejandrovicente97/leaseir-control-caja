@@ -176,6 +176,11 @@ def main() -> None:
         "extraido_en": datetime.now().isoformat(timespec="seconds"),
         "desde": str(desde), "hasta": str(hasta),
         "api": cli.version, "rutas": cli.rutas,
+        # nombres de campo reales del primer registro de cada bloque: sirve para
+        # no tener que adivinar el esquema en la proxima vuelta
+        "campos": {k: sorted(v[0].keys())
+                   for k, v in datos.items()
+                   if isinstance(v, list) and v and isinstance(v[0], dict)},
         "conteos": conteos, "avisos": datos.get("_avisos", []),
     }
 
