@@ -282,6 +282,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     eje = fc.get("ejecutado") or {}
     saldo_cierre = eje.get("saldo_cierre_mes", m0["saldo_proyectado"])
+    eje.setdefault("saldo_hoy", (eje.get("banco") or {}).get("saldo_hoy",
+                                                             fc["saldo_actual"]))
 
     est_fcf = "ok" if eje.get("fcf", 0) >= 0 else "mal"
     est_fin = "ok" if saldo_cierre > 200_000 else ("aviso" if saldo_cierre > 0 else "mal")
@@ -306,11 +308,21 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
+        kpi(f"Levered FCF {m0['etiqueta']} · lo que llevamos",
+            eur(eje.get("levered", eje.get("variacion_caja", 0))),
+            (f"Banco: {eur(eje.get('saldo_inicio', 0))} el día 1 → "
+             f"{eur(eje.get('saldo_hoy', fc['saldo_actual']))} hoy"
+             if eje.get("fuente") == "saldo del banco" else
+             "variación de caja del mes"),
+            "ok" if eje.get("levered", 0) >= 0 else "mal"),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
             eur(eje.get("fcf", 0)),
             # los tres numeros tienen que sumar al titular a la vista, o el
             # lector deja de fiarse de todo lo demas
-            (f"Caja {eur(eje.get('variacion_caja', 0))} menos financiación "
+            (f"Levered {eur(eje.get('levered', 0))} más pagos de deuda "
+             f"{eur(-eje.get('deuda', 0))}"
+             if eje.get("fuente") == "saldo del banco" else
+             f"Caja {eur(eje.get('variacion_caja', 0))} menos financiación "
              f"{eur(eje.get('financiacion', 0))}"
              + (f" menos por aplicar {eur(eje.get('por_aplicar', 0))}"
                 if abs(eje.get("por_aplicar", 0)) > 0.5 else "")
@@ -794,7 +806,44 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                  '<code>accounting:daily-ledger.read</code> en el token.</p>')
 
     # ---- puente hasta el unlevered ejecutado ------------------------------
-    if eje.get("fuente") == "libro diario":
+    if eje.get("fuente") == "saldo del banco":
+        bk = eje.get("banco") or {}
+        f_pu = [
+            [f'Saldo del banco al empezar {esc(m0["etiqueta"])}',
+             eur(bk.get("saldo_inicio", 0))],
+            ["Saldo del banco hoy", eur(bk.get("saldo_hoy", 0))],
+            ["<b>LEVERED FCF</b> = lo que ha movido la caja",
+             f'<b>{eur(bk.get("levered", 0))}</b>'],
+        ]
+        for x in eje.get("detalle_deuda") or []:
+            f_pu.append([f"&nbsp;&nbsp;<code>{esc(x['cuenta'])}</code> "
+                         f"{esc(x['nombre'] or 'deuda')}",
+                         f'<span class="{"neg" if x["importe"] < 0 else ""}">'
+                         f'{eur(x["importe"])}</span>'])
+        f_pu += [
+            ["Pagos de deuda del mes (principal, intereses y comisiones)",
+             f'<span class="{"neg" if bk.get("deuda", 0) < 0 else ""}">'
+             f'{eur(bk.get("deuda", 0))}</span>'],
+            ["<b>UNLEVERED FCF</b> = levered − pagos de deuda",
+             f'<b>{eur(bk.get("unlevered", 0))}</b>'],
+        ]
+        cl_pu = ([""] * 2 + ["sub"]
+                 + [""] * len(eje.get("detalle_deuda") or [])
+                 + ["sub", "total"])
+        t_puente = tabla(["Concepto", "Importe"], f_pu,
+                         alineacion=["", "r"], clases=cl_pu)
+        cd = eje.get("contraste_diario")
+        if cd is not None:
+            ok_cd = abs(cd) <= 1000
+            t_puente += (
+                f'<div class="nota-cuadre {"ok" if ok_cd else "mal"}" '
+                f'style="margin-top:14px">'
+                f'<b>{"CONTRASTE OK" if ok_cd else "EL DIARIO NO DICE LO MISMO"}</b>'
+                f' — el mismo mes calculado desde el libro diario da una '
+                f'diferencia de {eur(cd)} contra el extracto bancario. '
+                f'{"Los dos caminos llegan al mismo sitio." if ok_cd else "Hay que mirarlo: o falta un apunte o sobra."}'
+                f'</div>')
+    elif eje.get("fuente") == "libro diario":
         f_pu = []
         if abs(eje.get("traspasos", 0)) > 0.5:
             f_pu.append([
@@ -874,8 +923,20 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                     '<code>accounting:daily-ledger.read</code>.</p>')
 
     # ---- serie de unlevered ejecutado -------------------------------------
+    sb = meta.get("serie_fcf") or []
     su = meta.get("serie_unlevered") or []
-    if su:
+    if sb:
+        f_su = [[esc(x["etiqueta"]), eur(x["saldo_inicio"]), eur(x["saldo_hoy"]),
+                 f'<span class="{"neg" if x["levered"] < 0 else ""}">'
+                 f'{eur(x["levered"])}</span>',
+                 f'<span class="{"neg" if x["deuda"] < 0 else ""}">'
+                 f'{eur(x["deuda"])}</span>',
+                 f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
+                 f'{eur(x["unlevered"])}</span></b>'] for x in sb]
+        t_serie = tabla(["Mes", "Saldo inicial", "Saldo final", "Levered FCF",
+                         "Pagos de deuda", "Unlevered FCF"], f_su,
+                        alineacion=["", "r", "r", "r", "r", "r"])
+    elif su:
         f_su = [[esc(x["etiqueta"]), eur(x["variacion_caja"]),
                  f'<span class="{"neg" if x["financiacion"] < 0 else ""}">'
                  f'{eur(x["financiacion"])}</span>',
@@ -1261,10 +1322,10 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   </section>
 
   <section>
-    <h2>Cómo se llega al unlevered ejecutado de {etiqueta_m0}</h2>
-    <p class="h2n">Igual que en el bottom-up: de la variación real de caja hacia
-     arriba, quitando lo que es financiación. La cuenta por facturas se queda
-     como desglose, pero no como cifra: solo ve los pagos que llevan factura.</p>
+    <h2>Del banco al unlevered de {etiqueta_m0}</h2>
+    <p class="h2n">Lo que había en el banco el día 1, lo que hay hoy, y la
+     diferencia: eso es el levered. Sumando los pagos de deuda se llega al
+     unlevered. El punto de partida no es un cálculo, son dos saldos.</p>
     {t_puente}
   </section>
 

@@ -264,6 +264,11 @@ cuadre:
   # enumeran las cuentas de socios una a una.
   cuentas_financiacion: ["17", "52", "527", "66", "551", "552", "553"]
 
+  # Pagos de deuda: lo que hay que devolver al levered para llegar al
+  # unlevered. Principal de prestamos y polizas (17*, 52*), intereses y gastos
+  # financieros (66*, 527).
+  cuentas_deuda: ["17", "52", "527", "66"]
+
   # Cuentas puente: el dinero se ha movido pero todavia no se ha llevado a su
   # cuenta definitiva. Ni financiacion ni explotacion. En julio habia 145.000
   # aqui: dejarlos dentro mueve el unlevered esa cifra sin que nadie sepa de

@@ -502,6 +502,87 @@ class MotorCaja:
                .reset_index())
         return g.reindex(g["importe"].abs().sort_values(ascending=False).index)
 
+    def fcf_desde_banco(self, mes: str | None = None) -> dict | None:
+        """
+        El puente que pide Alejandro, y es el que hay que dar:
+
+            saldo del banco al empezar el mes
+            saldo del banco hoy
+            la diferencia ES el LEVERED free cash flow
+            + los pagos de deuda
+            = UNLEVERED free cash flow
+
+        La gracia de anclarlo en el saldo del banco es que el punto de partida
+        no es un calculo mio: son dos cifras que se pueden mirar en Holded y en
+        el extracto. Y los traspasos entre cuentas propias desaparecen solos,
+        porque se mira la tesoreria ENTERA y lo que sale de una cuenta entra en
+        otra. Toda la contorsion con la cuenta puente sobraba en cuanto se mira
+        el total en vez de cuenta a cuenta.
+
+        Las polizas y las tarjetas quedan fuera del perimetro, igual que en la
+        posicion: una linea de credito no es caja y una tarjeta es deuda.
+        """
+        mes = mes or self.mes
+        mov, ban = self.d.get("movimientos"), self.d.get("bancos")
+        if mov is None or mov.empty or ban is None or ban.empty:
+            return None
+
+        cuentas_caja = set(ban[ban["tipo"] == "cuenta"]["cuenta"])
+        m = mov.copy()
+        m = m[m["cuenta"].isin(cuentas_caja)]
+        if m.empty:
+            return None
+        m["mes"] = m["fecha"].map(mes_de)
+        del_mes = m[m["mes"] == mes]
+
+        # El saldo de Holded es el de HOY. Para cualquier mes, el saldo con el
+        # que empezo se deduce hacia atras quitando todo lo que ha pasado desde
+        # entonces: no hace falta guardar historico de saldos.
+        hoy_total = float(ban[ban["tipo"] == "cuenta"]["saldo"].sum())
+        variacion = float(del_mes["importe"].sum())
+        posterior = float(m[m["mes"] > mes]["importe"].sum())
+        saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
+        saldo_inicio = saldo_hoy - variacion
+
+        # Pagos de deuda del mes, del libro diario: principal (17*, 52*),
+        # intereses y gastos financieros (66*, 527).
+        deuda, det_deuda = 0.0, []
+        dia = self.d.get("diario")
+        if dia is not None and not dia.empty:
+            d = self._sin_apertura(dia[dia["mes"] == mes])
+            caja = d[d["cuenta"].astype(str).str.match(r"^5[74]")]
+            resto = d[~d["cuenta"].astype(str).str.match(r"^5[74]")]
+            pref = tuple(str(x) for x in
+                         (self.cfg.get("cuadre") or {}).get("cuentas_deuda")
+                         or ["17", "52", "527", "66"])
+            contra, nomb = {}, {}
+            for asiento, g in resto.groupby("asiento"):
+                i = g["importe"].abs().idxmax()
+                contra[asiento] = str(g.loc[i, "cuenta"])
+                nomb[asiento] = g.loc[i, "cuenta_nombre"] if "cuenta_nombre" in g else ""
+            c = caja.copy()
+            if not c.empty:
+                c["cta"] = c["asiento"].map(lambda a: contra.get(a, ""))
+                c["nom"] = c["asiento"].map(lambda a: nomb.get(a, ""))
+                dd = c[c["cta"].map(lambda x: str(x).startswith(pref))]
+                if not dd.empty:
+                    deuda = float(dd["importe"].sum())
+                    det_deuda = [
+                        {"cuenta": k[0], "nombre": k[1], "importe": float(v)}
+                        for k, v in dd.groupby(["cta", "nom"])["importe"].sum()
+                                      .sort_values().items()]
+
+        return {
+            "mes": mes, "etiqueta": nombre_mes(mes),
+            "saldo_inicio": saldo_inicio,
+            "saldo_hoy": saldo_hoy,
+            "levered": variacion,
+            "deuda": deuda,
+            "unlevered": variacion - deuda,
+            "detalle_deuda": det_deuda,
+            "n_movimientos": int(len(del_mes)),
+        }
+
     def unlevered_ejecutado(self, mes: str | None = None) -> dict | None:
         """
         El unlevered FCF ya ejecutado del mes, calculado como lo calcula el
@@ -657,6 +738,20 @@ class MotorCaja:
                  "importe": float(r["importe"])} for _, r in top_fuera.iterrows()],
             "n_apuntes": int(len(c)),
         }
+
+    def serie_fcf(self, n: int = 6) -> list:
+        """
+        El mismo puente, mes a mes: saldo inicial, saldo final, levered, deuda
+        y unlevered. Es la tabla con la que se contrasta contra el bottom-up
+        sin discutir una sola cifra.
+        """
+        salida = []
+        for i in range(n, 0, -1):
+            m = suma_meses(self.mes, -i)
+            b = self.fcf_desde_banco(m)
+            if b and (abs(b["levered"]) > 0.005 or abs(b["deuda"]) > 0.005):
+                salida.append(b)
+        return salida
 
     def serie_unlevered(self, n: int = 6) -> list:
         """
@@ -924,8 +1019,25 @@ class MotorCaja:
         # real: coge TODO lo que ha salido del banco, no solo lo que pasa por
         # factura o lo que reconozco por el concepto. La cuenta por facturas se
         # queda como desglose, que para eso sirve.
+        # El puente bueno es el que arranca del saldo del banco: es el que pidio
+        # Alejandro y el que no depende de ningun criterio mio. El del libro
+        # diario se queda como contraste, que para eso sirve tener dos caminos.
+        bk = self.fcf_desde_banco()
+        eje["banco"] = bk
         ul = self.unlevered_ejecutado()
-        if ul:
+        if bk:
+            eje["por_facturas"] = eje["fcf"]
+            eje["saldo_inicio"] = bk["saldo_inicio"]
+            eje["saldo_hoy"] = bk["saldo_hoy"]
+            eje["levered"] = bk["levered"]
+            eje["deuda"] = bk["deuda"]
+            eje["detalle_deuda"] = bk["detalle_deuda"]
+            eje["fcf"] = bk["unlevered"]
+            eje["fuente"] = "saldo del banco"
+            # el diario tiene que decir lo mismo; si no, hay que saberlo
+            eje["contraste_diario"] = (
+                None if not ul else bk["levered"] - ul["variacion_caja"])
+        elif ul:
             eje["por_facturas"] = eje["fcf"]
             eje["variacion_caja"] = ul["variacion_caja"]
             eje["financiacion"] = ul["financiacion"]
