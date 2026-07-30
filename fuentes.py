@@ -139,6 +139,23 @@ GRUPOS_PGC = [
     ("640", "Sueldos y salarios"), ("642", "Seguridad Social a cargo empresa"),
     ("621", "Arrendamientos"), ("623", "Servicios profesionales"),
     ("624", "Transportes"),
+    ("662", "Intereses de deudas"), ("665", "Intereses por descuento de efectos"),
+    ("669", "Otros gastos financieros"), ("668", "Diferencias de cambio"),
+    ("66",  "Gastos financieros"),
+    ("551", "Cuenta corriente con socios y administradores"),
+    ("552", "Cuenta corriente con empresas del grupo"),
+    ("553", "Cuenta corriente con socios"),
+    # 555 NO es financiacion: son apuntes que aun no se han aplicado a su
+    # cuenta definitiva. Meterlos en el puente del unlevered cambiaba la cifra
+    # de -2.449 a -133.569, que es toda la diferencia del mundo.
+    ("555", "Partidas pendientes de aplicacion"),
+    ("556", "Desembolsos exigidos"),
+    ("57",  "Tesoreria"),
+    ("41",  "Acreedores varios"), ("44", "Deudores varios"),
+    ("47",  "Administraciones publicas"),
+    ("52",  "Deudas a corto plazo"), ("17", "Deudas a largo plazo"),
+    ("60",  "Compras"), ("62", "Servicios exteriores"), ("63", "Tributos"),
+    ("64",  "Gastos de personal"), ("70", "Ventas"),
 ]
 
 

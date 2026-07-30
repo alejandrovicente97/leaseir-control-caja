@@ -617,7 +617,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     if eje.get("fuente") == "libro diario":
         f_pu = [["Variación real de caja del mes", eur(eje["variacion_caja"])]]
         for x in eje.get("detalle_financiacion") or []:
-            f_pu.append([f"&nbsp;&nbsp;{esc(x['concepto'])}",
+            f_pu.append([f"&nbsp;&nbsp;<code>{esc(x.get('cuenta',''))}</code> "
+                         f"{esc(x['concepto'])}",
                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
                          f'{eur(x["importe"])}</span>'])
         f_pu += [["Financiación incluida en esa variación",
@@ -630,6 +631,20 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         cl_pu = [""] * (len(f_pu) - 3) + ["sub", "total", ""]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
+        # Lo que se ha quedado fuera del perimetro, por si falta alguna cuenta
+        # que si deberia estar. Donde se pone esa frontera mueve la cifra
+        # entera, asi que se ensena en vez de darla por buena.
+        fp = eje.get("fuera_perimetro") or []
+        if fp:
+            t_puente += (
+                '<details><summary>Qué se ha quedado fuera del perímetro de '
+                'financiación (mayores movimientos)</summary>'
+                + tabla(["Cuenta", "Concepto", "Importe"],
+                        [[f'<code>{esc(x["cuenta"])}</code>', esc(x["concepto"]),
+                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
+                          f'{eur(x["importe"])}</span>'] for x in fp],
+                        alineacion=["", "", "r"])
+                + '</details>')
     else:
         t_puente = ('<p class="vacio">Sin libro diario: el ejecutado se calcula '
                     'con facturas y extracto, que no ve los pagos sin factura '

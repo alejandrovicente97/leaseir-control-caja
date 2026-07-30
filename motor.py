@@ -517,14 +517,31 @@ class MotorCaja:
 
         variacion = float(c["importe"].sum())
         financiacion = float(c[c["es_fin"]]["importe"].sum())
-        det = (c[c["es_fin"]].assign(nat=c["asiento"].map(nat))
-               .groupby("nat")["importe"].sum().sort_values())
+        # El detalle va por CUENTA y no solo por grupo: donde se pone la
+        # frontera de "financiacion" mueve la cifra entera, y eso hay que
+        # poder verlo cuenta a cuenta para discutirlo, no aceptarlo.
+        f = c[c["es_fin"]].copy()
+        f["nat"] = f["asiento"].map(nat)
+        det = (f.groupby(["cta_contra", "nat"])["importe"].sum()
+                 .reset_index().sort_values("importe"))
+        # y lo que se ha quedado FUERA del perimetro tambien se ensena, por si
+        # falta alguna cuenta que si deberia estar
+        fuera = c[~c["es_fin"]].copy()
+        fuera["nat"] = fuera["asiento"].map(nat)
+        top_fuera = (fuera.groupby(["cta_contra", "nat"])["importe"].sum()
+                          .reset_index())
+        top_fuera = top_fuera.reindex(
+            top_fuera["importe"].abs().sort_values(ascending=False).index).head(12)
         return {
             "variacion_caja": variacion,
             "financiacion": financiacion,
             "unlevered": variacion - financiacion,
-            "detalle_financiacion": [{"concepto": k, "importe": float(v)}
-                                     for k, v in det.items()],
+            "detalle_financiacion": [
+                {"cuenta": r["cta_contra"], "concepto": r["nat"],
+                 "importe": float(r["importe"])} for _, r in det.iterrows()],
+            "fuera_perimetro": [
+                {"cuenta": r["cta_contra"], "concepto": r["nat"],
+                 "importe": float(r["importe"])} for _, r in top_fuera.iterrows()],
             "n_apuntes": int(len(c)),
         }
 
@@ -691,6 +708,7 @@ class MotorCaja:
             eje["variacion_caja"] = ul["variacion_caja"]
             eje["financiacion"] = ul["financiacion"]
             eje["detalle_financiacion"] = ul["detalle_financiacion"]
+            eje["fuera_perimetro"] = ul["fuera_perimetro"]
             eje["fcf"] = ul["unlevered"]
             eje["fuente"] = "libro diario"
         else:

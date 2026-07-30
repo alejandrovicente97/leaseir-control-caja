@@ -222,7 +222,11 @@ cuadre:
   # Lo que hay que quitar de la variacion de caja para que sea UNLEVERED:
   # principal de prestamos y polizas, intereses y gastos financieros, y
   # movimientos con socios. Es la misma frontera que usa el bottom-up.
-  cuentas_financiacion: ["17", "52", "527", "66", "55"]
+  # OJO con el detalle: "55" a secas incluia la 555, Partidas pendientes de
+  # aplicacion, que NO es financiacion sino apuntes sin aplicar todavia. Con
+  # ella dentro el unlevered de julio daba -133.569 y sin ella -2.449. Se
+  # enumeran las cuentas de socios una a una.
+  cuentas_financiacion: ["17", "52", "527", "66", "551", "552", "553"]
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 
