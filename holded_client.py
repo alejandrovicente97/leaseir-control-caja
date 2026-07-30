@@ -64,6 +64,7 @@ class Holded:
         self.bitacora: list[dict] = []
         self.rutas: dict[str, str] = {}      # recurso -> ruta que funciona
         self.truncados: dict[str, int] = {}  # url -> registros, si parece cortada
+        self._confirmado = False             # el ultimo total se pudo verificar
 
     # -----------------------------------------------------------------------
     def _log(self, t: str) -> None:
@@ -239,10 +240,13 @@ class Holded:
                     self._log(f"    [SOSPECHA] corta en {len(salida)} (multiplo de "
                               f"{LIMITE}) sin cursor. Claves de la respuesta: "
                               f"{sorted(d.keys()) if isinstance(d, dict) else type(d)}")
+                    self._confirmado = False
                     extra = self._rescatar(url, salida, **params)
                     if extra:
                         salida.extend(extra)
-                    else:
+                    elif not self._confirmado:
+                        # solo se marca como truncada si NO se ha podido
+                        # confirmar que ese es el total de verdad
                         self.truncados[url] = len(salida)
                 break
             time.sleep(PAUSA)
@@ -268,6 +272,25 @@ class Holded:
         por page y por offset, quedandose con lo que traiga ids nuevos.
         """
         vistos = {x.get("id") or x.get("_id") for x in ya if isinstance(x, dict)}
+
+        # Primero, la prueba que decide: pedir lo mismo con la mitad de limite.
+        # Si el recurso tiene de verdad N registros, con limit=50 se llega al
+        # mismo N paginando. Si lo que hay es un tope duro, se queda corto.
+        # Sin esta prueba no se puede distinguir "son 100" de "me dan 100".
+        mitad = self._paginar_simple(url, LIMITE // 2, **params)
+        if mitad is not None:
+            if len(mitad) > len(ya):
+                nuevos = [x for x in mitad if isinstance(x, dict)
+                          and (x.get("id") or x.get("_id")) not in vistos]
+                self._log(f"    [RESCATE] con limit={LIMITE // 2} llegan "
+                          f"{len(mitad)} en vez de {len(ya)}: era un tope de "
+                          f"pagina, no el final del recurso")
+                return nuevos
+            self._log(f"    [COMPROBADO] con limit={LIMITE // 2} salen "
+                      f"{len(mitad)}, los mismos: son {len(ya)} de verdad")
+            self._confirmado = True
+            return []
+
         for nombre in ("page", "offset"):
             rescatado, n = [], 0
             for i in range(1, 200):
@@ -290,6 +313,27 @@ class Holded:
         self._log("    [RESCATE] ni page ni offset devuelven nada nuevo: "
                   "se da por completo en 100")
         return []
+
+    def _paginar_simple(self, url: str, limite: int, **params) -> list | None:
+        """Pagina por cursor con un limite dado. Solo para comprobar totales."""
+        salida, cursor, vueltas = [], None, 0
+        while vueltas < 400:
+            p = dict(params); p["limit"] = limite
+            if cursor:
+                p["cursor"] = cursor
+            d = self.get(url, **p)
+            if not isinstance(d, dict):
+                return None
+            items = d.get("items") or d.get("data") or []
+            salida.extend(items)
+            meta = d.get("meta") if isinstance(d.get("meta"), dict) else {}
+            cursor = (d.get("cursor") or d.get("next_cursor")
+                      or d.get("nextCursor") or meta.get("cursor"))
+            vueltas += 1
+            if not cursor or not items:
+                break
+            time.sleep(PAUSA)
+        return salida
 
     def _paginar_page(self, url: str, **params) -> list | None:
         """API v1: paginacion por page. Corta tambien por repeticion."""
