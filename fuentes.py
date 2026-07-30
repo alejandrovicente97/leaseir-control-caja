@@ -106,55 +106,134 @@ def nombre_mes(mes: str) -> str:
 # ===========================================================================
 #  FUENTE 1 - HOLDED JSON  (lo que produce holded_extract.py)
 # ===========================================================================
+# Esquema canonico. Se declara explicitamente para que un bloque vacio de
+# Holded produzca un DataFrame vacio PERO CON COLUMNAS. Sin esto, si un
+# endpoint falla el motor casca con KeyError en lugar de dar cero.
+COLS_DOC = ["num", "tercero", "cuenta", "fecha", "vencimiento", "total",
+            "liquidado", "pendiente", "estado", "estado_api", "fecha_liq",
+            "mes_venc", "mes_factura", "tipologia"]
+COLS_BANCO = ["cuenta", "saldo", "tipo", "limite"]
+COLS_MOV = ["cuenta", "fecha", "importe", "concepto"]
+
+
+def _pri(d: dict, *claves, defecto=None):
+    """Primer valor no vacio de una lista de claves candidatas."""
+    for k in claves:
+        if k in d and d[k] not in (None, "", []):
+            return d[k]
+    return defecto
+
+
 def desde_holded(ruta: Path) -> dict:
+    """
+    Normaliza el JSON del extractor.
+
+    Los nombres de campo de Holded no son estables entre endpoints ni entre
+    versiones, asi que cada dato se busca en varias claves candidatas en vez de
+    dar una por segura. Un cambio de nombre en Holded degrada un campo, no
+    tumba el forecast.
+    """
     with open(ruta, encoding="utf-8") as f:
         d = json.load(f)
 
-    contactos = {c.get("id"): c.get("name") for c in d.get("contactos", [])}
+    meta = d.get("_meta", {}) or {}
+    contactos = {}
+    for c in d.get("contactos", []) or []:
+        if isinstance(c, dict):
+            cid = _pri(c, "id", "_id")
+            if cid:
+                contactos[cid] = _pri(c, "name", "tradeName", "legalName", defecto="")
 
     def documentos(clave, signo=1):
         filas = []
-        for doc in d.get(clave, []):
-            total = num(doc.get("total")) * signo
-            pagado = num(doc.get("paymentsTotal") or doc.get("paid")) * signo
-            venc = a_fecha(doc.get("dueDate") or doc.get("date"))
+        for doc in d.get(clave, []) or []:
+            if not isinstance(doc, dict):
+                continue
+            total = num(_pri(doc, "total", "totalAmount", "amount", defecto=0)) * signo
+            cobrado = num(_pri(doc, "paymentsTotal", "paid", "paidAmount", defecto=0)) * signo
+            # Holded suele dar el pendiente ya calculado: es mas fiable que restar
+            pend_api = _pri(doc, "paymentsPending", "pending", "pendingAmount")
+            pendiente = num(pend_api) * signo if pend_api is not None else total - cobrado
+
+            venc = a_fecha(_pri(doc, "dueDate", "duedate", "date"))
+            emision = a_fecha(_pri(doc, "date", "issuedDate", "createdAt"))
+            f_liq = a_fecha(_pri(doc, "paymentDate", "paidDate", "lastPaymentDate"))
+            # si esta cobrada del todo y no hay fecha de cobro, vale el vencimiento
+            if f_liq is None and abs(pendiente) < 0.01 and abs(total) > 0.01:
+                f_liq = venc
+
+            estado_api = _pri(doc, "status", "state")
+            if abs(pendiente) < 0.01 and abs(total) > 0.01:
+                estado = "Pagado"
+            elif venc and venc < date.today():
+                estado = "Vencido"
+            else:
+                estado = "Pendiente"
+
+            tags = _pri(doc, "tags", defecto=[]) or []
+            tag = tags[0] if isinstance(tags, list) and tags else (
+                tags if isinstance(tags, str) else "")
+
             filas.append({
-                "num":         doc.get("docNumber") or doc.get("invoiceNum") or doc.get("id"),
-                "tercero":     doc.get("contactName") or contactos.get(doc.get("contact")) or "",
-                "cuenta":      (doc.get("desc") or "")[:80],
-                "fecha":       a_fecha(doc.get("date")),
+                "num":         _pri(doc, "docNumber", "invoiceNum", "number", "id", defecto=""),
+                "tercero":     _pri(doc, "contactName", "contact_name",
+                                    defecto=contactos.get(_pri(doc, "contact", "contactId"), "")),
+                "cuenta":      str(_pri(doc, "desc", "description", "notes", defecto=""))[:90],
+                "fecha":       emision,
                 "vencimiento": venc,
                 "total":       total,
-                "liquidado":   pagado,
-                "pendiente":   total - pagado,
-                "estado":      "Pagado" if abs(total - pagado) < 0.01 else (
-                               "Vencido" if venc and venc < date.today() else "Pendiente"),
-                "fecha_liq":   a_fecha(doc.get("paymentDate")),
+                "liquidado":   cobrado,
+                "pendiente":   pendiente,
+                "estado":      estado,
+                "estado_api":  estado_api,
+                "fecha_liq":   f_liq,
                 "mes_venc":    mes_de(venc),
-                "mes_factura": mes_de(a_fecha(doc.get("date"))),
-                "tipologia":   (doc.get("tags") or [""])[0] if doc.get("tags") else "",
+                "mes_factura": mes_de(emision),
+                "tipologia":   tag,
             })
         return filas
 
-    ventas = documentos("facturas_venta") + documentos("abonos_venta", -1)
+    ventas = documentos("facturas_venta") + documentos("recibos_venta") \
+        + documentos("abonos_venta", -1)
     compras = documentos("facturas_compra") + documentos("abonos_compra", -1)
 
+    # ---- posicion bancaria ------------------------------------------------
     bancos = []
-    for c in d.get("cuentas_tesoreria", []):
-        tipo = "poliza" if "poliz" in norm(c.get("name", "")).lower() or c.get("type") == "credit" else "cuenta"
-        bancos.append({"cuenta": c.get("name"), "saldo": num(c.get("balance")),
-                       "tipo": tipo, "limite": num(c.get("creditLimit"))})
+    for c in d.get("cuentas_tesoreria", []) or []:
+        if not isinstance(c, dict):
+            continue
+        nombre = _pri(c, "name", "alias", "description", defecto="(sin nombre)")
+        tipo_api = str(_pri(c, "type", "accountType", defecto="")).lower()
+        es_poliza = ("poliz" in norm(nombre).lower() or "credit" in tipo_api
+                     or "linea" in norm(nombre).lower())
+        bancos.append({
+            "cuenta": nombre,
+            "saldo": num(_pri(c, "balance", "currentBalance", "amount", defecto=0)),
+            "tipo": "poliza" if es_poliza else "cuenta",
+            "limite": num(_pri(c, "creditLimit", "limit", defecto=0)),
+        })
 
-    movs = [{"cuenta": m.get("_cuenta_nombre"), "fecha": a_fecha(m.get("date")),
-             "importe": num(m.get("amount")), "concepto": m.get("description") or m.get("concept")}
-            for m in d.get("movimientos_tesoreria", [])]
+    movs = []
+    for m in d.get("movimientos_tesoreria", []) or []:
+        if not isinstance(m, dict):
+            continue
+        movs.append({
+            "cuenta": m.get("_cuenta_nombre"),
+            "fecha": a_fecha(_pri(m, "date", "valueDate", "createdAt")),
+            "importe": num(_pri(m, "amount", "value", "total", defecto=0)),
+            "concepto": _pri(m, "description", "concept", "desc", defecto=""),
+        })
 
+    sello = meta.get("extraido_en", "?")
     return {
-        "ventas": pd.DataFrame(ventas).rename(columns={"tercero": "cliente"}),
-        "compras": pd.DataFrame(compras).rename(columns={"tercero": "proveedor"}),
-        "bancos": pd.DataFrame(bancos),
-        "movimientos": pd.DataFrame(movs),
-        "origen": f"Holded API ({d.get('_meta', {}).get('extraido_en', '?')})",
+        "ventas": pd.DataFrame(ventas, columns=COLS_DOC).rename(
+            columns={"tercero": "cliente"}),
+        "compras": pd.DataFrame(compras, columns=COLS_DOC).rename(
+            columns={"tercero": "proveedor"}),
+        "bancos": pd.DataFrame(bancos, columns=COLS_BANCO),
+        "movimientos": pd.DataFrame(movs, columns=COLS_MOV),
+        "origen": f"API de Holded ({sello})",
+        "avisos_origen": meta.get("avisos", []),
     }
 
 

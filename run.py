@@ -92,19 +92,42 @@ def main() -> None:
     if excl:
         calidad.append("Excluidos del forecast por configuracion: " + ", ".join(excl) + ".")
     v = m.cobros_por_factura()
-    sin_cal = int((~v["en_calendario"]).sum())
-    if sin_cal:
-        calidad.append(
-            f"{sin_cal} facturas de {m.mes_inicio} en adelante no figuran en el calendario "
-            f"de Eli; se toman como exigibles al 100%. Conviene revisarlas con ella.")
-    neg = v[v["pendiente_cobro"] < -0.01]
-    if len(neg):
-        calidad.append(
-            f"{len(neg)} facturas con cobro por encima del calendario "
-            f"({abs(neg['pendiente_cobro'].sum()):,.0f} EUR): anticipos de cliente o "
-            f"cuotas mal cargadas en la hoja de Eli.")
+    if not v.empty and "en_calendario" in v.columns:
+        sin_cal = int((~v["en_calendario"]).sum())
+        if sin_cal:
+            calidad.append(
+                f"{sin_cal} facturas de {m.mes_inicio} en adelante no figuran en el "
+                f"calendario de Eli; se toman como exigibles al 100%. Conviene "
+                f"revisarlas con ella.")
+        neg = v[v["pendiente_cobro"] < -0.01]
+        if len(neg):
+            calidad.append(
+                f"{len(neg)} facturas con cobro por encima del calendario "
+                f"({abs(neg['pendiente_cobro'].sum()):,.0f} EUR): anticipos de cliente o "
+                f"cuotas mal cargadas en la hoja de Eli.")
+
+    # ---- control de credibilidad del origen -------------------------------
+    graves = []
+    nv, nc = len(datos["ventas"]), len(datos["compras"])
+    if nv == 0:
+        graves.append("No ha llegado ninguna factura de venta.")
+    elif nv < 50:
+        graves.append(f"Solo {nv} facturas de venta: parecen muy pocas.")
+    if nc == 0:
+        graves.append("No ha llegado ninguna factura de compra.")
+    elif nc < 50:
+        graves.append(f"Solo {nc} facturas de compra: parecen muy pocas.")
+    if datos["bancos"].empty:
+        graves.append("Sin cuentas bancarias: la posicion y el cuadre no tienen base.")
+    if cal is None or cal.empty:
+        graves.append("El calendario de cobros de Eli ha venido vacio.")
+    for a in datos.get("avisos_origen") or []:
+        calidad.append(f"Aviso de la extraccion: {a}")
+    if graves:
+        print("\n  [ATENCION] " + " / ".join(graves))
 
     meta = {"origen": datos["origen"], "bancos": datos["bancos"], "calidad": calidad,
+            "problemas_graves": graves,
             "contraste": cfg.get("contraste_excel") or {},
             "cuadre_proyeccion": m.cuadre_proyeccion(fc),
             "url_workflow": (cfg.get("publicacion") or {}).get("url_workflow")}

@@ -185,7 +185,8 @@ class MotorCaja:
         if not self.cfg["cobros"]["proyectar_rentings_sin_factura"] or self.cal.empty:
             return pd.DataFrame(columns=["cliente", "mes", "importe"])
 
-        emitidas = set(self.ventas["num"].map(norm))
+        emitidas = (set(self.ventas["num"].map(norm))
+                    if "num" in self.ventas.columns and not self.ventas.empty else set())
         cal = self.cal.copy()
         cal["k"] = cal["factura"].map(norm)
         futuro = cal[(~cal["k"].isin(emitidas)) & (cal["mes"].isin(self.meses))]
@@ -204,6 +205,8 @@ class MotorCaja:
         al mes en curso en lugar de perderse.
         """
         c = self.compras.copy()
+        if c.empty or "pendiente" not in c.columns:
+            return pd.DataFrame()
         c = c[c["pendiente"].abs() > 0.01]
         if c.empty:
             return pd.DataFrame()
@@ -232,6 +235,8 @@ class MotorCaja:
     def detalle_pagos(self) -> pd.DataFrame:
         """Facturas de compra pendientes, una por linea, para el desplegable."""
         c = self.compras.copy()
+        if c.empty or "pendiente" not in c.columns:
+            return pd.DataFrame()
         c = c[c["pendiente"].abs() > 0.01].copy()
         if c.empty:
             return c
@@ -272,6 +277,9 @@ class MotorCaja:
         """
         cfg = self.cfg["recurrentes"]
         c = self.compras.copy()
+        if c.empty or "proveedor" not in c.columns:
+            return pd.DataFrame(columns=["proveedor", "grupo", "mes", "base_mensual",
+                                         "frecuencia", "facturado_en_holded", "proyectado"])
         c["_p"] = c["proveedor"].map(norm)
 
         ventana = [suma_meses(self.mes, -i) for i in range(1, cfg["ventana_meses"] + 1)]
@@ -416,8 +424,13 @@ class MotorCaja:
         mes = mes or self.mes
         v, c = self.ventas, self.compras
 
-        cobros = float(v[v["fecha_liq"].map(mes_de) == mes]["liquidado"].sum())
-        pagos = float(c[c["fecha_liq"].map(mes_de) == mes]["liquidado"].sum())
+        def liquidado_del_mes(df):
+            if df.empty or "fecha_liq" not in df.columns:
+                return 0.0
+            return float(df[df["fecha_liq"].map(mes_de) == mes]["liquidado"].sum())
+
+        cobros = liquidado_del_mes(v)
+        pagos = liquidado_del_mes(c)
         flujo_facturas = cobros - pagos
 
         mv = self.d.get("movimientos")
@@ -436,6 +449,47 @@ class MotorCaja:
         dif = None if variacion is None else flujo_facturas - variacion
         tol = self.cfg["cuadre"]["tolerancia_eur"]
 
+        # Conciliacion linea a linea: que movimientos del banco NO se
+        # corresponden con el cobro o el pago de una factura. Esos son la
+        # explicacion de la diferencia, y darlos por su nombre es la diferencia
+        # entre "no cuadra por 179.550" y "no cuadra: son las nominas".
+        sin_conciliar, resumen = [], []
+        if mv is not None and not mv.empty:
+            liq = []
+            for df, signo in ((v, 1), (c, -1)):
+                if df.empty or "fecha_liq" not in df.columns:
+                    continue
+                sub = df[df["fecha_liq"].map(mes_de) == mes]
+                for _, r in sub.iterrows():
+                    if abs(r["liquidado"]) > 0.01:
+                        liq.append((abs(r["liquidado"]), r["fecha_liq"]))
+            usados = set()
+            for _, r in mv[mv["mes"] == mes].iterrows():
+                imp = abs(r["importe"])
+                casa = None
+                for i, (m_imp, m_f) in enumerate(liq):
+                    if i in usados or abs(m_imp - imp) > 0.5:
+                        continue
+                    if r["fecha"] and m_f and abs((r["fecha"] - m_f).days) <= 5:
+                        casa = i
+                        break
+                if casa is not None:
+                    usados.add(casa)
+                else:
+                    sin_conciliar.append({
+                        "fecha": r["fecha"], "cuenta": r["cuenta"],
+                        "concepto": r["concepto"] or "(sin concepto)",
+                        "importe": float(r["importe"]),
+                    })
+            if sin_conciliar:
+                sc = pd.DataFrame(sin_conciliar)
+                resumen = (sc.assign(g=sc["concepto"].str.slice(0, 40))
+                           .groupby("g")["importe"].sum()
+                           .reset_index().sort_values("importe", key=abs, ascending=False)
+                           .rename(columns={"g": "concepto"}).to_dict("records"))
+
+        explicado = sum(x["importe"] for x in sin_conciliar)
+
         return {
             "mes": mes, "etiqueta": nombre_mes(mes),
             "cobros_ejecutados": cobros,
@@ -447,6 +501,10 @@ class MotorCaja:
             "tolerancia": tol,
             "fuente": fuente,
             "por_cuenta": por_cuenta,
+            "sin_conciliar": sin_conciliar,
+            "resumen_sin_conciliar": resumen,
+            "importe_sin_conciliar": explicado,
+            "residuo": (None if dif is None else dif + explicado),
             "explicacion": (
                 "La diferencia recoge los movimientos que no pasan por factura: "
                 "nominas y seguros sociales, impuestos, comisiones bancarias, "

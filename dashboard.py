@@ -413,19 +413,34 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                 ["Diferencia", "<i>—</i>"],
             ]))
     else:
-        ok = cuadre["cuadra"]
+        residuo = cuadre.get("residuo")
+        ok = residuo is not None and abs(residuo) <= cuadre["tolerancia"]
+        titulo = "CUADRA" if ok else "QUEDA UN RESIDUO"
         cuadre_html = (
             f'<div class="nota-cuadre {"ok" if ok else "mal"}">'
-            f'<b>{"CUADRA" if ok else "NO CUADRA"}</b> — diferencia '
-            f'{eur(cuadre["diferencia"])} sobre una tolerancia de '
-            f'{eur(cuadre["tolerancia"])}. {esc(cuadre["explicacion"])}</div>'
+            f'<b>{titulo}</b> — la diferencia entre facturas y banco es '
+            f'{eur(cuadre["diferencia"])}, y {eur(cuadre.get("importe_sin_conciliar") or 0)} '
+            f'se explican por movimientos que no pasan por factura. '
+            f'Residuo sin explicar: <b>{eur(residuo)}</b> '
+            f'(tolerancia {eur(cuadre["tolerancia"])}).</div>'
             + tabla(["Concepto", cuadre["etiqueta"]], [
                 ["Cobros ejecutados", eur(cuadre["cobros_ejecutados"])],
                 ["Pagos ejecutados", eur(-cuadre["pagos_ejecutados"])],
                 ["<b>Flujo según facturas</b>", f'<b>{eur(cuadre["flujo_por_facturas"])}</b>'],
                 ["Variación de saldo bancario", eur(cuadre["variacion_bancaria"])],
-                ["<b>Diferencia</b>", f'<b>{eur(cuadre["diferencia"])}</b>'],
+                ["Diferencia", eur(cuadre["diferencia"])],
+                ["Movimientos sin factura", eur(cuadre.get("importe_sin_conciliar") or 0)],
+                ["<b>Residuo sin explicar</b>", f'<b>{eur(residuo)}</b>'],
             ]))
+        sc = cuadre.get("resumen_sin_conciliar") or []
+        if sc:
+            f_sc = [[esc(x["concepto"]), eur(x["importe"])] for x in sc[:25]]
+            cuadre_html += (
+                '<h2 style="font-size:15px;margin-top:22px">Qué hay detrás de la diferencia</h2>'
+                '<p class="h2n">Movimientos bancarios del mes que no se corresponden con el '
+                'cobro o el pago de ninguna factura: nóminas, impuestos, comisiones, '
+                'pólizas, préstamos y traspasos entre cuentas propias.</p>'
+                + tabla(["Concepto", "Importe"], f_sc))
 
     # ---- bancos -----------------------------------------------------------
     b = meta.get("bancos")
@@ -524,6 +539,19 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                                     vacio="Sin pagos pendientes.")
 
     cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
+    # Aviso a toda pantalla si los datos de origen no son creibles. Un fallo
+    # silencioso de Holded produciria un forecast con pinta de correcto, y eso
+    # es peor que no tener dashboard.
+    problemas = meta.get("problemas_graves") or []
+    if problemas:
+        banner = ('<div class="banner"><b>ATENCION: los datos de origen no son '
+                  'fiables.</b><ul>' +
+                  "".join(f"<li>{esc(p)}</li>" for p in problemas) +
+                  '</ul><span>No tomes decisiones de pago con estas cifras hasta '
+                  'revisar el log del workflow.</span></div>')
+    else:
+        banner = ""
+
     url_workflow = meta.get("url_workflow") or (
         "https://github.com/alejandrovicente97/leaseir-control-caja"
         "/actions/workflows/caja.yml")
@@ -663,6 +691,11 @@ tr.sub:hover td,tr.total:hover td{{background:inherit}}
 .dq li{{margin-bottom:6px}}
 details{{margin-top:12px}}
 summary{{cursor:pointer;font-size:13px;color:{P['ink2']};font-weight:600;padding:6px 0}}
+.banner{{background:#fbe6e6;border-left:4px solid {P['crit']};border-radius:4px;
+ padding:14px 18px;margin:0 0 18px;color:#8f1d1d;font-size:14px}}
+.banner b{{display:block;margin-bottom:6px;font-size:15px}}
+.banner ul{{margin:6px 0;padding-left:22px}}
+.banner span{{display:block;margin-top:8px;font-weight:600}}
 .tabs{{display:flex;gap:6px;margin:0 0 20px;border-bottom:2px solid {P['grid']}}}
 .tab{{appearance:none;background:none;border:0;border-bottom:3px solid transparent;
  margin-bottom:-2px;padding:11px 18px;font-size:14.5px;font-weight:600;
@@ -723,6 +756,8 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
      title="Abre GitHub Actions y lanza el workflow: vuelve a leer Holded y el calendario de Eli">
      ⟳ Forzar actualización</a>
 </div>
+
+{banner}
 
 <nav class="tabs">
   <button class="tab activa" data-p="p1">Forecast de caja</button>
