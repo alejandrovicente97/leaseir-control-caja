@@ -526,18 +526,37 @@ class MotorCaja:
         pol = b[b["tipo"] == "poliza"] if not b.empty else b
         limites = (self.cfg.get("tesoreria") or {}).get("polizas") or []
         disp_pol, lim_total, sin_limite = 0.0, 0.0, []
+        # Una poliza con saldo POSITIVO no esta dispuesta: tiene dinero dentro.
+        # La 9418 tiene 971.776 en positivo, el 74% de toda la posicion. Sacarla
+        # de la caja por ser cuenta de credito habria escondido casi un millon
+        # de euros que estan ahi. Se cuenta como caja, pero se dice aparte:
+        # tener el grueso de la tesoreria en una cuenta de credito no es
+        # indiferente y quien lo mira tiene que verlo.
+        saldo_en_pol = 0.0
         for _, r in pol.iterrows():
-            dispuesto = -float(r["saldo"]) if float(r["saldo"]) < 0 else 0.0
+            saldo = float(r["saldo"])
+            dispuesto = -saldo if saldo < 0 else 0.0
+            if saldo > 0:
+                saldo_en_pol += saldo
             lim = next((float(x.get("limite") or 0) for x in limites
                         if norm(str(x.get("cuenta", ""))).lower()
                         in norm(str(r["cuenta"])).lower()), 0.0)
             if lim > 0:
                 lim_total += lim
                 disp_pol += lim - dispuesto
-            else:
+            elif dispuesto > 0.005:
                 sin_limite.append(f"{r['cuenta']} (dispuesto {dispuesto:,.0f})"
                                   .replace(",", " "))
         self.polizas_sin_limite = sin_limite
+
+        # Las tarjetas no son caja: un saldo negativo en una tarjeta es deuda a
+        # pagar, no tesoreria disponible. Se saca del saldo y se dice cuanto es.
+        tar = b[b["tipo"] == "tarjeta"] if not b.empty else b
+        deuda_tarjetas = float(tar["saldo"].sum()) if not tar.empty else 0.0
+
+        # el dinero que hay dentro de las polizas es caja igual: entra en la
+        # posicion, aunque se informe por separado
+        saldo_cta += saldo_en_pol
 
         acum = saldo_cta
         for m in self.meses:
@@ -570,6 +589,7 @@ class MotorCaja:
             "ejecutado": eje,
             "fijos_pagados": pagado,
             "polizas_limite": lim_total, "polizas_sin_limite": sin_limite,
+            "saldo_en_polizas": saldo_en_pol, "deuda_tarjetas": deuda_tarjetas,
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
             "detalle": {"salarios": sal_det, "cuotas_sl": sl_det},
             "clientes": cli, "rentings": rent, "proveedores": prov, "recurrentes": recu,

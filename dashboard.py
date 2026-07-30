@@ -296,6 +296,10 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         nota_pol = f"pólizas: {esc(', '.join(sin_lim))}, límite sin configurar"
     else:
         nota_pol = "sin pólizas"
+    # Tener el grueso de la tesoreria dentro de una cuenta de credito no es
+    # indiferente: se cuenta como caja pero se dice.
+    if fc.get("saldo_en_polizas", 0) > 0.5:
+        nota_pol += f" · de los cuales {eur(fc['saldo_en_polizas'])} están en cuenta de crédito"
 
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
@@ -488,6 +492,10 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         if n_cero:
             t_ban += (f'<p class="vacio">{n_cero} cuenta{"s" if n_cero != 1 else ""} '
                       f'a cero no se muestra{"n" if n_cero != 1 else ""}.</p>')
+        if fc.get("deuda_tarjetas", 0) < -0.5:
+            t_ban += (f'<p class="vacio">Las tarjetas suman '
+                      f'{eur(fc["deuda_tarjetas"])} y no cuentan como caja: '
+                      f'un saldo negativo en tarjeta es deuda a pagar.</p>')
     else:
         t_ban = '<p class="vacio">Sin cuentas.</p>'
 

@@ -130,10 +130,17 @@ def clasificar_cuenta(nombre: str, tipo_api: str = "") -> str:
     justo lo contrario de lo que son.
     """
     n = norm(nombre).lower()
-    if "tarjeta" in n or "card" in n or "visa" in n or "mastercard" in n:
+    # "T.CAIXA ARTURO 5139", "T. Santander Maria Magaz" y "Santander VIA T"
+    # tambien son tarjetas: abreviadas y de peaje. Sin esto se colaban en la
+    # caja como cuenta corriente, con su saldo negativo incluido.
+    if (any(p in n for p in ("tarjeta", "card", "visa", "mastercard", "amex",
+                             "american express", "via t"))
+            or re.match(r"^t\.?\s?[a-z]*\s?\d*$", n)
+            or re.match(r"^t\.", n)):
         return "tarjeta"
-    if ("poliz" in n or "credit" in n or "linea de credito" in n
-            or "credit" in (tipo_api or "").lower()):
+    # "Santander Cred. (7628)" es una poliza abreviada
+    if ("poliz" in n or "credit" in n or "cred." in n
+            or "linea de credito" in n or "credit" in (tipo_api or "").lower()):
         return "poliza"
     return "cuenta"
 
