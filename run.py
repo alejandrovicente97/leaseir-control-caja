@@ -135,6 +135,7 @@ def main() -> None:
     # ---- salida ----------------------------------------------------------
     html = construir(fc, cu, alertas, meta)
     out = Path(args.salida)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(html, encoding="utf-8")
 
     L = fc["lineas"]

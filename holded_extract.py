@@ -56,8 +56,9 @@ RECURSOS_V2 = {
                          "salesrefunds", "rectificative-invoices"], False),
     "recibos_venta":   (["sales-receipts", "salesreceipts", "receipts"], False),
     "facturas_compra": (["purchases", "purchase-invoices", "expenses"], True),
-    "abonos_compra":   (["purchase-refunds", "purchaserefunds",
-                         "purchases/refunds"], False),
+    "abonos_compra":   (["purchases-refunds", "purchase-refunds", "refunds",
+                         "purchase-credit-notes", "purchases/credit-notes",
+                         "expenses-refunds"], False),
     "contactos":       (["contacts"], False),
     "pagos":           (["payments"], False),
     "libro_diario":    (["accounting/entries", "accounting/journal-entries",
@@ -73,7 +74,10 @@ RECURSOS_V1 = {
     "pagos":           ([f"{BASE_V1}/payments"], False),
     "libro_diario":    ([f"{BASE_V1_CONTA}/dailyledger"], False),
 }
-TESORERIA_V2 = ["treasuries", "treasury", "bank-accounts"]
+# La referencia de Holded titula esto "Listado de cuentas bancarias", sin dar
+# el path. Se prueban los nombres razonables y el cliente recuerda el que va.
+TESORERIA_V2 = ["bank-accounts", "treasuries", "treasury", "banks",
+                "bank_accounts", "treasury/accounts", "accounts"]
 TESORERIA_V1 = [f"{BASE_V1}/treasury"]
 
 
