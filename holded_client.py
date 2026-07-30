@@ -217,11 +217,21 @@ class Holded:
                 return salida
             items = d.get("items") or d.get("data") or []
             salida.extend(items)
-            cursor = d.get("cursor")
+            # el cursor no siempre se llama igual ni vive en la raiz
+            meta = d.get("meta") if isinstance(d.get("meta"), dict) else {}
+            cursor = (d.get("cursor") or d.get("next_cursor") or d.get("nextCursor")
+                      or meta.get("cursor") or meta.get("next_cursor"))
             vueltas += 1
             if vueltas == 1 or vueltas % 10 == 0:
                 self._log(f"    pagina {vueltas:>3}  total {len(salida)}")
             if not cursor or not d.get("has_more", bool(cursor)) or not items:
+                # Cortar justo en un multiplo exacto del limite sin cursor es la
+                # firma de una descarga truncada, no de un recurso que se acaba.
+                # Se avisa con las claves de la respuesta para poder arreglarlo.
+                if salida and len(salida) % LIMITE == 0:
+                    self._log(f"    [SOSPECHA] corta en {len(salida)} (multiplo de "
+                              f"{LIMITE}) sin cursor. Claves de la respuesta: "
+                              f"{sorted(d.keys()) if isinstance(d, dict) else type(d)}")
                 break
             time.sleep(PAUSA)
             if vueltas > 400:

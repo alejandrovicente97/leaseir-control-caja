@@ -117,9 +117,18 @@ def extraer(cli: Holded, desde: date, hasta: date) -> dict:
             continue
         nombre = c.get("name", cid)
         if v == "v2":
-            cands = [f"treasuries/{cid}/movements",
-                     f"treasuries/{cid}/bank-movements",
-                     f"treasuries/{cid}/cash-movements"]
+            # Los movimientos cuelgan de la misma coleccion que ha respondido
+            # para las cuentas: si las cuentas salieron por bank-accounts, los
+            # movimientos estan en bank-accounts/{id}/..., no en treasuries/{id}.
+            raiz = cli.rutas.get("cuentas_tesoreria", "treasuries")
+            cands = []
+            for base_r in dict.fromkeys([raiz, "treasuries", "bank-accounts"]):
+                cands += [f"{base_r}/{cid}/movements",
+                          f"{base_r}/{cid}/transactions",
+                          f"{base_r}/{cid}/bank-movements",
+                          f"{base_r}/{cid}/cash-movements"]
+            cands += [f"treasury-movements?account_id={cid}",
+                      f"bank-movements?bank_account_id={cid}"]
         else:
             cands = [f"{BASE_V1}/treasury/{cid}/movements"]
         lote = cli.listar(f"movs::{cid}", cands, **ventana)
@@ -192,7 +201,16 @@ def main() -> None:
 
     print("\n" + "-" * 80)
     for k, val in conteos.items():
-        print(f"  {k:26s} {val:>8,}")
+        ruta = cli.rutas.get(k, "")
+        print(f"  {k:26s} {val:>8,}   {ruta}")
+    print("-" * 80)
+
+    # Los nombres de campo reales, en el log y no solo en el json: sin esto hay
+    # que adivinar como se llama cada importe y una equivocacion no se ve, se
+    # convierte en un numero creible y equivocado.
+    print("\n  CAMPOS REALES DE CADA BLOQUE")
+    for k, campos in datos["_meta"]["campos"].items():
+        print(f"  {k}:\n      {', '.join(campos)}")
     print("-" * 80)
     for a in datos["_meta"]["avisos"]:
         print(f"  [aviso] {a}")
