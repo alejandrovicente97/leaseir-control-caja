@@ -594,10 +594,21 @@ class MotorCaja:
         c["es_fin"] = (c["cta_contra"].map(lambda x: str(x).startswith(pref_fin))
                        | c["es_sl"]) & ~c["es_susp"]
 
-        variacion = float(c["importe"].sum())
+        # Un traspaso entre cuentas propias NO es variacion de caja: es la misma
+        # caja cambiada de sitio. Cuando las dos patas van banco contra banco se
+        # anulan solas al sumar, pero cuando una pasa por cuenta puente solo se
+        # ve una, y en julio eso metia +145.000 de entrada que no existe.
+        #
+        # Antes se restaba despues, al final del puente. El resultado era el
+        # mismo pero la cifra que se llamaba "variacion real de caja" no lo era,
+        # y los numeros del KPI no sumaban al titular: -103.645 con -101.196 de
+        # financiacion no dan -133.569 por ningun lado. Alejandro lo vio de un
+        # vistazo. Sacandolos de la variacion, que es su sitio, la variacion de
+        # julio queda en -248.645 y todo cuadra a la vista.
+        traspasos = float(c[c["es_traspaso"]]["importe"].sum())
+        variacion = float(c[~c["es_traspaso"]]["importe"].sum())
         financiacion = float(c[c["es_fin"]]["importe"].sum())
         suspenso = float(c[c["es_susp"]]["importe"].sum())
-        traspasos = float(c[c["es_traspaso"]]["importe"].sum())
         por_aplicar = suspenso - traspasos
         # El detalle va por CUENTA y no solo por grupo: donde se pone la
         # frontera de "financiacion" mueve la cifra entera, y eso hay que
@@ -633,7 +644,9 @@ class MotorCaja:
             "traspasos": traspasos,
             "por_aplicar": por_aplicar,
             "detalle_suspenso": det_susp,
-            "unlevered": variacion - financiacion - suspenso,
+            # los traspasos ya no estan dentro de la variacion, asi que aqui
+            # solo se quita lo que de verdad esta pendiente de aplicar
+            "unlevered": variacion - financiacion - por_aplicar,
             "detalle_financiacion": [
                 {"cuenta": r["cta_contra"], "concepto": r["nat"],
                  "nombre": r.get("nom_contra", ""),

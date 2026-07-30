@@ -305,9 +305,11 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
             eur(eje.get("fcf", 0)),
-            (f"Caja {eur(eje.get('variacion_caja', 0))} · financiación "
+            # los tres numeros tienen que sumar al titular a la vista, o el
+            # lector deja de fiarse de todo lo demas
+            (f"Caja {eur(eje.get('variacion_caja', 0))} menos financiación "
              f"{eur(eje.get('financiacion', 0))}"
-             + (f" · por aplicar {eur(eje.get('por_aplicar', 0))}"
+             + (f" menos por aplicar {eur(eje.get('por_aplicar', 0))}"
                 if abs(eje.get("por_aplicar", 0)) > 0.5 else "")
              if eje.get("fuente") == "libro diario" else
              f"Cobrado {eur(eje.get('cobros', 0))} · pagado {eur(eje.get('pagos', 0))}"),
@@ -729,7 +731,14 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     # ---- puente hasta el unlevered ejecutado ------------------------------
     if eje.get("fuente") == "libro diario":
-        f_pu = [["Variación real de caja del mes", eur(eje["variacion_caja"])]]
+        f_pu = []
+        if abs(eje.get("traspasos", 0)) > 0.5:
+            f_pu.append([
+                "<i>Traspasos entre cuentas propias, ya excluidos: "
+                "la misma caja cambiada de sitio</i>",
+                f'<i>{eur(eje["traspasos"])}</i>'])
+        f_pu.append(["Variación real de caja del mes",
+                     eur(eje["variacion_caja"])])
         for x in eje.get("detalle_financiacion") or []:
             # el nombre real de la cuenta, no solo el grupo del PGC: "52000042"
             # dice "Deudas a corto con entidades de credito" y en realidad es
@@ -745,21 +754,17 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                   f'{eur(eje["financiacion"])}</span>']]
         tras = eje.get("traspasos", 0)
         apl = eje.get("por_aplicar", eje.get("suspenso", 0))
-        if abs(tras) > 0.5:
-            f_pu.append([
-                "Traspasos entre cuentas propias vía cuenta puente "
-                "<i>(no es caja, se anulan solos)</i>",
-                f'<span class="{"neg" if tras < 0 else ""}">{eur(tras)}</span>'])
         if abs(apl) > 0.5:
             f_pu.append([
                 "Pendiente de aplicar de verdad — <b>hay que clasificarlo</b>",
                 f'<span class="{"neg" if apl < 0 else ""}">{eur(apl)}</span>'])
-        f_pu += [["<b>Unlevered FCF ejecutado</b> = variación − financiación − puente",
+        f_pu += [["<b>Unlevered FCF ejecutado</b> = variación − financiación"
+                  + (" − pendiente de aplicar"
+                     if abs(eje.get("por_aplicar", 0)) > 0.5 else ""),
                   f'<b>{eur(eje["fcf"])}</b>'],
                  ["Para contrastar: la misma cifra contando solo facturas",
                   eur(eje.get("por_facturas", 0))]]
-        n_sub = (1 + (abs(eje.get("traspasos", 0)) > 0.5)
-                 + (abs(eje.get("por_aplicar", 0)) > 0.5))
+        n_sub = 1 + (abs(eje.get("por_aplicar", 0)) > 0.5)
         cl_pu = [""] * (len(f_pu) - 2 - n_sub) + ["sub"] * n_sub + ["total", ""]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
