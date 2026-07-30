@@ -33,6 +33,15 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      # Sondeo primero y con continue-on-error: asi el log SIEMPRE muestra la
+      # tabla cabecera x endpoint con lo que responde Holded, aunque la
+      # extraccion falle despues. Un run basta para diagnosticar.
+      - name: Sondear la API de Holded
+        continue-on-error: true
+        env:
+          HOLDED_API_KEY: ${{ secrets.HOLDED_API_KEY }}
+        run: python holded_extract.py --probar
+
       - name: Extraer Holded
         env:
           HOLDED_API_KEY: ${{ secrets.HOLDED_API_KEY }}
@@ -40,8 +49,12 @@ jobs:
           if [ -z "$HOLDED_API_KEY" ]; then
             echo "::error::Falta el secret HOLDED_API_KEY"; exit 1
           fi
-          python holded_extract.py --desde 2024-01-01 --destino datos/
+          python holded_extract.py --anos 4 --destino datos/
 
+      # El Sheet de Eli esta compartido como "cualquiera con el enlace puede ver",
+      # asi que se baja con una URL normal. No hace falta cuenta de servicio ni
+      # secret de Google. Si algun dia se vuelve a restringir, el script tira
+      # automaticamente de GOOGLE_SERVICE_ACCOUNT_JSON.
       - name: Descargar el calendario de cobros de Eli
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -69,7 +82,9 @@ jobs:
           git config user.email "actions@leaseir.com"
           mkdir -p historico
           cp publicado/index.html "historico/caja_$(date +%Y%m%d).html"
-          git add -f publicado/index.html historico/
+          # GitHub Pages sirve desde la raiz de main
+          cp publicado/index.html index.html
+          git add -f publicado/index.html historico/ index.html
           git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
           git push
 
