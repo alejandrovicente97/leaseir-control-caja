@@ -1,5 +1,5 @@
 {
- "extraido_en": "2026-07-30T14:49:41",
+ "extraido_en": "2026-07-30T15:23:19",
  "desde": "2022-01-01",
  "hasta": "2028-12-31",
  "api": "v2",
@@ -10,6 +10,7 @@
   "facturas_compra": "purchases",
   "contactos": "contacts",
   "pagos": "payments",
+  "plan_contable": "accounting-accounts",
   "cuentas_tesoreria": "treasury/accounts",
   "movs::6530197ec53dc5901a004d55": "treasury/accounts/6530197ec53dc5901a004d55/bank-movements",
   "movs::65301a58987e4339410cad6d": "treasury/accounts/65301a58987e4339410cad6d/bank-movements",
@@ -170,6 +171,19 @@
    "total_transactions",
    "type"
   ],
+  "plan_contable": [
+   "archived",
+   "balance",
+   "color",
+   "credit",
+   "debit",
+   "description",
+   "group",
+   "id",
+   "name",
+   "non_deductible",
+   "number"
+  ],
   "cuentas_tesoreria": [
    "account_number",
    "accounting_account_id",
@@ -216,9 +230,10 @@
   "facturas_compra": 6433,
   "contactos": 1355,
   "pagos": 15002,
+  "plan_contable": 5627,
   "libro_diario": 0,
   "cuentas_tesoreria": 36,
-  "movimientos_tesoreria": 10269,
+  "movimientos_tesoreria": 10270,
   "_avisos": 2
  },
  "avisos": [
