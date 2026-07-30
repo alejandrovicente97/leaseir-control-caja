@@ -165,6 +165,12 @@ tesoreria:
   # Ponlo en false si prefieres verlas todas.
   ocultar_saldo_cero: true
 
+  # Si el saldo que hay DENTRO de una cuenta de credito cuenta como caja.
+  # No: una linea de credito es financiacion disponible, no tesoreria propia.
+  # Con esto en true la posicion de julio daba 1.297.931 cuando la caja de
+  # verdad son 326.155 y el resto esta en la poliza 9418.
+  polizas_en_caja: false
+
 # ---------------------------------------------------------------------------
 # 3.quater LO YA PAGADO DEL MES EN CURSO
 # ---------------------------------------------------------------------------
@@ -193,6 +199,36 @@ ejecutado:
       - "vencimiento prestamo"
     recurrentes: []
     otros_fijos: []
+
+# ---------------------------------------------------------------------------
+# 3.quinquies PREVISIONES: LO QUE DE VERDAD SE VA A COBRAR Y A PAGAR
+# ---------------------------------------------------------------------------
+# El motor proyecta que una factura vencida es exigible. La realidad es que hay
+# clientes que no van a pagar este mes, o no van a pagar entero, y eso no esta
+# en Holded ni puede estarlo: es criterio de quien lleva la caja.
+#
+# Cada linea dice: para este cliente o proveedor, en este mes, el importe de
+# verdad es este. importe: 0 significa "no se cobra".
+#
+#   tipo    cobro | pago
+#   clave   nombre del cliente/proveedor tal cual sale en el panel, o el
+#           numero de factura
+#   mes     YYYYMM. Si no esta entre los meses del forecast, se ignora
+#   importe el importe realista, en positivo
+#   nota    por que. Sale en el panel al lado de la cifra
+#
+# Nada se aplica en silencio: el panel enseña cada correccion con lo que decia
+# el motor, lo que dice la prevision y la diferencia. Y si una clave no casa
+# con ningun cliente, lo dice en rojo en vez de callarse.
+#
+# Ejemplo (quita el comentario y edita):
+previsiones: []
+#   - { tipo: cobro, clave: "CORPODERM (DistRec-12)", mes: 202607, importe: 150000,
+#       nota: "acuerdo de pago: 150k este mes y el resto en septiembre" }
+#   - { tipo: cobro, clave: "AMB AESTHETICS LTD", mes: 202607, importe: 0,
+#       nota: "no responde, no contamos con ello" }
+#   - { tipo: pago,  clave: "Monocrom S.L.", mes: 202607, importe: 80000,
+#       nota: "negociado aplazamiento del resto" }
 
 # ---------------------------------------------------------------------------
 # 4. CLASIFICACION DE CERTIDUMBRE  (el "Mapping Nacho" 1-6)

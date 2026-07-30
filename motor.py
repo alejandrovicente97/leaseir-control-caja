@@ -692,6 +692,88 @@ class MotorCaja:
         return f.sort_values(["sentido", "fecha", "tercero"])
 
     # =======================================================================
+    #  PREVISIONES: LO QUE DE VERDAD SE VA A COBRAR Y A PAGAR
+    # =======================================================================
+    def previsiones(self) -> list:
+        """
+        Correcciones manuales sobre lo que el motor proyecta.
+
+        El forecast dice que una factura vencida es exigible. La realidad es
+        que hay clientes que no van a pagar este mes, o no van a pagar entero,
+        y eso no esta en Holded ni puede estarlo: es criterio de quien lleva la
+        caja. Sin poder decirlo, el proyectado es una cifra que nadie usa.
+
+        Cada prevision dice: para este cliente o esta factura, en este mes, el
+        importe de verdad es este. Cero significa "no se cobra".
+
+        Nunca se aplica en silencio: el panel enseña cada correccion con lo que
+        decia el motor, lo que dice la prevision y la diferencia. Una cifra
+        corregida a mano que no se sabe corregida es peor que la original.
+        """
+        salida = []
+        for p in (self.cfg.get("previsiones") or []):
+            mes = str(p.get("mes") or "")
+            if mes and mes not in self.meses:
+                continue
+            salida.append({
+                "tipo": str(p.get("tipo", "cobro")).lower(),
+                "clave": str(p.get("clave", "")),
+                "k": norm(p.get("clave", "")),
+                "mes": mes or self.mes,
+                "importe": float(p.get("importe") or 0),
+                "nota": str(p.get("nota", "")),
+            })
+        return salida
+
+    def _aplicar_previsiones(self, cli, prov):
+        """
+        Sustituye lo proyectado por lo previsto y devuelve el rastro completo.
+
+        Casa por numero de factura o por nombre de tercero, sin acentos ni
+        mayusculas. Si una clave no casa con nada NO se aplica en silencio: se
+        devuelve marcada para que salga en el panel, porque una prevision que
+        no encuentra su factura es una prevision que no esta haciendo nada y
+        alguien tiene que enterarse.
+        """
+        prev = self.previsiones()
+        if not prev:
+            return cli, prov, []
+
+        rastro = []
+        for p in prev:
+            destino = cli if p["tipo"] == "cobro" else prov
+            col = f"teorico_{p['mes']}" if p["tipo"] == "cobro" else f"pago_{p['mes']}"
+            if destino is None or destino.empty or col not in destino.columns:
+                rastro.append({**p, "antes": 0.0, "aplicada": False,
+                               "motivo": "no hay datos de ese mes"})
+                continue
+            campo = "cliente" if p["tipo"] == "cobro" else "proveedor"
+            marca = destino[campo].map(norm) == p["k"]
+            if not marca.any():
+                rastro.append({**p, "antes": 0.0, "aplicada": False,
+                               "motivo": f"no encuentro '{p['clave']}'"})
+                continue
+            # Las dos columnas, teorico_ y pago_, guardan magnitudes en
+            # positivo: el signo se lo pone el forecast al montar la linea. Si
+            # la prevision de un pago se guarda en negativo, el "antes" y el
+            # "despues" salen con signos distintos y la diferencia es el doble
+            # de lo que es. Se guarda como lo guarda todo el mundo aqui.
+            antes = float(destino.loc[marca, col].sum())
+            nuevo = abs(p["importe"])
+            # todo el ajuste se carga en la primera fila que casa; el resto a 0,
+            # para que el total del tercero sea exactamente el previsto
+            idx = list(destino.index[marca])
+            destino.loc[idx, col] = 0.0
+            destino.loc[idx[0], col] = nuevo
+            # para enseñarlo, el signo del flujo: los cobros entran, los pagos
+            # salen. Asi la diferencia se lee como lo que le pasa a la caja.
+            sg = 1 if p["tipo"] == "cobro" else -1
+            rastro.append({**p, "antes": antes * sg, "despues": nuevo * sg,
+                           "diferencia": (nuevo - antes) * sg, "aplicada": True,
+                           "motivo": ""})
+        return cli, prov, rastro
+
+    # =======================================================================
     def forecast(self) -> dict:
         cli = self.cobros_por_cliente()
         rent = self.rentings_sin_factura()
@@ -699,6 +781,8 @@ class MotorCaja:
         recu = self.recurrentes_proyectados()
         sal, sal_det = self.salarios_mes()
         sl, sl_det = self.cuotas_sl_mes()
+
+        cli, prov, rastro_prev = self._aplicar_previsiones(cli, prov)
 
         cob_cfg = self.cfg["cobros"]
         sin_fact = sum(x["unidades"] * x["precio"] * (1 + x["iva"])
@@ -798,9 +882,16 @@ class MotorCaja:
         tar = b[b["tipo"] == "tarjeta"] if not b.empty else b
         deuda_tarjetas = float(tar["saldo"].sum()) if not tar.empty else 0.0
 
-        # el dinero que hay dentro de las polizas es caja igual: entra en la
-        # posicion, aunque se informe por separado
-        saldo_cta += saldo_en_pol
+        # LAS POLIZAS NO SON CAJA. Yo habia razonado que una cuenta de credito
+        # con saldo positivo tiene dinero dentro y por tanto es tesoreria, y
+        # Alejandro lo corrigio de una frase: "la caja no es esa, descuenta las
+        # polizas". Tiene razon en lo que importa: una linea de credito es
+        # financiacion disponible, no caja propia, y meterla en la posicion
+        # bancaria hace que la empresa parezca tener 1,3 millones cuando tiene
+        # 326.000 y el resto es credito.
+        # Se informa aparte, en su KPI, que para eso esta.
+        if (self.cfg.get("tesoreria") or {}).get("polizas_en_caja", False):
+            saldo_cta += saldo_en_pol
 
         acum = saldo_cta
         for m in self.meses:
@@ -854,6 +945,7 @@ class MotorCaja:
 
         return {
             "meses": self.meses, "lineas": out,
+            "previsiones": rastro_prev,
             "ejecutado": eje,
             "fijos_pagados": pagado,
             "polizas_limite": lim_total, "polizas_sin_limite": sin_limite,
@@ -909,6 +1001,46 @@ class MotorCaja:
         impuestos, comisiones, disposiciones de poliza, prestamos, traspasos.
         """
         mes = mes or self.mes
+
+        # Con libro diario esto deja de ser una conciliacion por aproximacion y
+        # pasa a ser una identidad: cada movimiento de caja tiene su
+        # contrapartida en el mismo asiento, asi que no puede quedar residuo.
+        # Emparejar importes del extracto con liquidaciones de facturas, que es
+        # lo que se hacia antes, dejaba 178.000 euros sin explicar por pura
+        # construccion: los pagos sin factura no tenian con que casar.
+        nat = self.caja_por_naturaleza(mes)
+        if nat is not None and not nat.empty:
+            variacion = float(nat["importe"].sum())
+            filas = [{"concepto": r["naturaleza"], "importe": float(r["importe"]),
+                      "apuntes": int(r["apuntes"])} for _, r in nat.iterrows()]
+            cobros = float(sum(x["importe"] for x in filas if x["importe"] > 0))
+            pagos = float(sum(x["importe"] for x in filas if x["importe"] < 0))
+            return {
+                "mes": mes, "etiqueta": nombre_mes(mes),
+                "fuente": "libro diario",
+                "cobros_ejecutados": cobros,
+                "pagos_ejecutados": pagos,
+                "flujo_por_facturas": variacion,
+                "variacion_bancaria": variacion,
+                "diferencia": 0.0,
+                "cuadra": True,
+                "tolerancia": float(self.cfg["cuadre"]["tolerancia_eur"]),
+                "naturaleza": filas,
+                "sin_conciliar": [],
+                "resumen_sin_conciliar": [],
+                "importe_sin_conciliar": 0.0,
+                "residuo": 0.0,
+                "por_cuenta": [],
+                "explicacion": (
+                    "Sale del libro diario: cada movimiento de caja lleva su "
+                    "contrapartida en el mismo asiento, asi que todo el flujo "
+                    "del mes queda explicado por naturaleza y no queda residuo. "
+                    "Antes se emparejaban importes del extracto con "
+                    "liquidaciones de facturas y quedaban 178.000 euros sin "
+                    "explicar, que eran justamente los pagos sin factura."
+                ),
+            }
+
         v, c = self.ventas, self.compras
 
         def liquidado_del_mes(df):

@@ -13,6 +13,8 @@ from __future__ import annotations
 import html
 import json
 import os
+
+from fuentes import nombre_mes
 from datetime import datetime, timezone
 
 try:
@@ -299,7 +301,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # Tener el grueso de la tesoreria dentro de una cuenta de credito no es
     # indiferente: se cuenta como caja pero se dice.
     if fc.get("saldo_en_polizas", 0) > 0.5:
-        nota_pol += f" · de los cuales {eur(fc['saldo_en_polizas'])} están en cuenta de crédito"
+        nota_pol += (f" · además {eur(fc['saldo_en_polizas'])} dentro de la "
+                     f"cuenta de crédito, que no cuenta como caja")
 
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
@@ -447,6 +450,26 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                 ["Variación de saldo bancario", "<i>pendiente de Holded</i>"],
                 ["Diferencia", "<i>—</i>"],
             ]))
+    elif cuadre.get("fuente") == "libro diario":
+        # Del diario no sale residuo: cada movimiento lleva su contrapartida en
+        # el mismo asiento. En vez de un "no cuadra por X" se enseña de que se
+        # compone el flujo del mes, euro a euro.
+        nat = cuadre.get("naturaleza") or []
+        f_na = [[esc(x["concepto"]),
+                 f'<span class="{"neg" if x["importe"] < 0 else ""}">'
+                 f'{eur(x["importe"])}</span>', f'{x["apuntes"]}'] for x in nat]
+        f_na.append(["<b>Variación de caja del mes</b>",
+                     f'<b>{eur(cuadre["variacion_bancaria"])}</b>', ""])
+        cuadre_html = (
+            '<div class="nota-cuadre ok"><b>CUADRA POR CONSTRUCCIÓN</b> — sale del '
+            'libro diario, donde cada movimiento de caja lleva su contrapartida '
+            'en el mismo asiento. Todo el flujo del mes queda explicado por '
+            'naturaleza y no hay residuo posible. Antes se emparejaban importes '
+            'del extracto con liquidaciones de facturas y quedaban 178 000 € sin '
+            'explicar, que eran justamente los pagos sin factura.</div>'
+            + tabla(["Contrapartida", cuadre["etiqueta"], "Apuntes"], f_na,
+                    alineacion=["", "r", "r"],
+                    clases=[""] * (len(f_na) - 1) + ["total"]))
     else:
         residuo = cuadre.get("residuo")
         ok = residuo is not None and abs(residuo) <= cuadre["tolerancia"]
@@ -713,6 +736,43 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     t_desglose = ("".join(des) if des else
                   '<p class="vacio">Sin detalle disponible.</p>')
+
+    # ---- previsiones manuales ---------------------------------------------
+    # Una cifra corregida a mano que no se sabe corregida es peor que la
+    # original: se enseña que decia el motor, que dice la prevision y cuanto
+    # cambia. Y si una clave no casa con nadie, se dice en rojo.
+    pv = fc.get("previsiones") or []
+    if pv:
+        f_pv = []
+        for x in pv:
+            if x.get("aplicada"):
+                f_pv.append([
+                    f'{esc(x["clave"])} <span class="chip ok">'
+                    f'{esc(x["tipo"])}</span>',
+                    esc(nombre_mes(x["mes"]) if len(x["mes"]) == 6 else x["mes"]),
+                    eur(x["antes"]), eur(x["despues"]),
+                    f'<span class="{"neg" if x["diferencia"] < 0 else ""}">'
+                    f'{eur(x["diferencia"])}</span>',
+                    esc(x["nota"])])
+            else:
+                f_pv.append([
+                    f'{esc(x["clave"])} <span class="chip crit">sin aplicar</span>',
+                    esc(x["mes"]), "—", "—",
+                    f'<span class="neg">{esc(x["motivo"])}</span>', esc(x["nota"])])
+        aplic = [x for x in pv if x.get("aplicada")]
+        if aplic:
+            f_pv.append(["<b>Efecto total sobre el forecast</b>", "", "", "",
+                         f'<b>{eur(sum(x["diferencia"] for x in aplic))}</b>', ""])
+        t_prev = tabla(["Cliente / proveedor", "Mes", "Decía el motor",
+                        "Dice la previsión", "Diferencia", "Por qué"], f_pv,
+                       alineacion=["", "", "r", "r", "r", ""],
+                       clases=[""] * (len(f_pv) - (1 if aplic else 0))
+                              + (["total"] if aplic else []))
+    else:
+        t_prev = ('<p class="vacio">Sin previsiones manuales: el forecast va tal '
+                  'cual sale de Holded y del calendario de Eli. Para corregir lo '
+                  'que sabes que no se va a cobrar o pagar, edita la sección '
+                  '<code>previsiones</code> de <code>config.yaml</code>.</p>')
 
     # ---- caja del mes por naturaleza contable -----------------------------
     cn = meta.get("caja_naturaleza")
@@ -1155,6 +1215,14 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
      recurrentes) se proyectan aparte.</p>
     {tabla_fc}
     <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
+  </section>
+
+  <section>
+    <h2>Previsiones: lo que de verdad se va a cobrar y pagar</h2>
+    <p class="h2n">Correcciones manuales sobre lo que proyecta el motor. Holded
+     no sabe que un cliente no va a pagar este mes; tú sí. Cada corrección se
+     ve con lo que decía el motor y cuánto mueve el forecast.</p>
+    {t_prev}
   </section>
 
   <section>
