@@ -1,24 +1,29 @@
 # -*- coding: utf-8 -*-
 """
 ============================================================================
- LEASEIR - Cliente de la API de Holded
+ LEASEIR - Cliente de la API de Holded (v2, con respaldo a v1)
 ============================================================================
- Escrito a prueba de sorpresas, porque la API de Holded no es homogenea:
- conviven formatos de token distintos, no todos los endpoints aceptan los
- mismos parametros y algunos tipos de documento no existen en todas las
- cuentas.
+ Holded lanzo en junio de 2026 una API nueva y dejo la anterior obsoleta.
+ Conviven dos mundos y hay que hablar el idioma que toque:
 
- Reglas de diseno, aprendidas del run #1 (que devolvio HTTP 400):
+   API v2   https://api.holded.com/api/v2/...
+            token pat_...          cabecera  Authorization: Bearer
+            paginacion por cursor  {items, cursor, has_more}
+            permisos por ambito    falta uno -> 403
 
-  1. Un 400 NO significa token invalido. Significa peticion mal formada.
-     Solo un 401 o un 403 hablan de credenciales.
-  2. La sonda de autenticacion prueba cabeceras Y endpoints. Si solo se
-     prueba un endpoint y resulta que ese endpoint no existe, se concluye
-     erroneamente que la culpa es del token.
-  3. Un bloque que falla no tumba la extraccion entera: se avisa, se deja
-     vacio y se sigue. Perder los abonos no debe impedir traer las facturas.
-  4. La paginacion se corta tambien por repeticion: si un endpoito ignora
-     el parametro 'page', devolveria lo mismo indefinidamente.
+   API v1   https://api.holded.com/api/invoicing/v1/...
+            clave hex de 32        cabecera  key:
+            paginacion por page
+            OBSOLETA, "dejara de funcionar"
+
+ De donde sale esto: el run #3 devolvio {"status":0,"info":"Invalid key"} con
+ HTTP 400 en todos los endpoints v1. La causa no era el token sino que se
+ estaba llamando a la API vieja con un token de la nueva.
+
+ El cliente detecta solo cual aplica, y ademas prueba varios nombres de ruta
+ por recurso: la referencia lista los endpoints por titulo, no por path, asi
+ que en lugar de apostar por un nombre se prueban los candidatos y se registra
+ el que responde.
 ============================================================================
 """
 from __future__ import annotations
@@ -28,10 +33,12 @@ from datetime import datetime, date, timezone
 
 import requests
 
-BASE_INVOICING = "https://api.holded.com/api/invoicing/v1"
-BASE_ACCOUNTING = "https://api.holded.com/api/accounting/v1"
+BASE_V2 = "https://api.holded.com/api/v2"
+BASE_V1 = "https://api.holded.com/api/invoicing/v1"
+BASE_V1_CONTA = "https://api.holded.com/api/accounting/v1"
 TIMEOUT = 60
-PAUSA = 0.30
+PAUSA = 0.25
+LIMITE = 100
 
 
 def ts(d: date) -> int:
@@ -43,176 +50,187 @@ class HoldedError(RuntimeError):
 
 
 class Holded:
-    """Cliente minimo, tolerante y que deja rastro de todo lo que intenta."""
-
-    # (nombre, cabeceras, manda Content-Type en el GET)
-    MODOS = [
-        ("key",           {"key": "{k}"},                  False),
-        ("key+ct",        {"key": "{k}"},                  True),
-        ("bearer",        {"Authorization": "Bearer {k}"},  False),
-        ("bearer+ct",     {"Authorization": "Bearer {k}"},  True),
-        ("x-api-key",     {"X-API-KEY": "{k}"},             False),
-        ("x-auth-token",  {"X-AUTH-TOKEN": "{k}"},          False),
-        ("apikey",        {"apikey": "{k}"},                False),
-    ]
-
-    # Endpoints de sondeo, del mas probable al menos. Se prueban todos porque
-    # un 400 puede venir del endpoint y no de la credencial.
-    SONDAS = [
-        f"{BASE_INVOICING}/contacts",
-        f"{BASE_INVOICING}/documents/invoice",
-        f"{BASE_INVOICING}/treasury",
-        f"{BASE_INVOICING}/customers",
-        f"{BASE_INVOICING}/products",
-        f"{BASE_INVOICING}/numbering-series",
-    ]
 
     def __init__(self, api_key: str, verboso: bool = True):
         if not api_key:
-            raise HoldedError(
-                "No hay API key. Define HOLDED_API_KEY en el entorno "
-                "(en GitHub va como secret)."
-            )
+            raise HoldedError("No hay API key. Define HOLDED_API_KEY en el entorno.")
         self.key = api_key.strip()
         self.s = requests.Session()
-        self.modo: str | None = None
+        self.version: str | None = None      # 'v2' | 'v1'
         self.verboso = verboso
         self.bitacora: list[dict] = []
+        self.rutas: dict[str, str] = {}      # recurso -> ruta que funciona
 
     # -----------------------------------------------------------------------
-    def _cab(self, modo: str) -> dict:
-        for nombre, plantilla, con_ct in self.MODOS:
-            if nombre == modo:
-                h = {"Accept": "application/json",
-                     "User-Agent": "leaseir-control-caja/1.0"}
-                if con_ct:
-                    h["Content-Type"] = "application/json"
-                for c, v in plantilla.items():
-                    h[c] = v.format(k=self.key)
-                return h
-        return {"Accept": "application/json", "key": self.key}
-
-    def _log(self, txt: str) -> None:
+    def _log(self, t: str) -> None:
         if self.verboso:
-            print(txt, flush=True)
+            print(t, flush=True)
+
+    def _cab(self, version: str) -> dict:
+        h = {"Accept": "application/json", "User-Agent": "leaseir-control-caja/2.0"}
+        if version == "v2":
+            h["Authorization"] = f"Bearer {self.key}"
+        else:
+            h["key"] = self.key
+        return h
 
     # -----------------------------------------------------------------------
     def autenticar(self) -> str:
-        """
-        Encuentra la combinacion cabecera/endpoint que Holded acepta.
-        Deja en self.bitacora el resultado de cada intento, para que el log del
-        workflow sirva de diagnostico sin tener que adivinar.
-        """
-        if self.modo:
-            return self.modo
+        """Decide si la clave es de la API v2 o de la v1, probandolo."""
+        if self.version:
+            return self.version
 
-        self._log("  Sondeando la API de Holded (cabecera x endpoint)")
-        self._log(f"  {'cabecera':14s} {'endpoint':34s} codigo  respuesta")
-        self._log("  " + "-" * 78)
+        # El formato ya da una pista fuerte, pero se comprueba de verdad.
+        orden = ["v2", "v1"] if self.key.startswith("pat_") else ["v1", "v2"]
+        pruebas = {"v2": f"{BASE_V2}/invoices", "v1": f"{BASE_V1}/documents/invoice"}
 
-        vistos_401 = False
-        for nombre, _, _ in self.MODOS:
-            for url in self.SONDAS:
-                corto = url.replace(BASE_INVOICING, "").replace(BASE_ACCOUNTING, "acc:")
+        self._log("  Detectando version de la API de Holded")
+        for v in orden:
+            url = pruebas[v]
+            try:
+                r = self.s.get(url, headers=self._cab(v),
+                               params={"limit": 1}, timeout=TIMEOUT)
+            except requests.RequestException as e:
+                raise HoldedError(f"Sin conexion con api.holded.com: {e}")
+
+            cuerpo = (r.text or "").strip().replace("\n", " ")[:120]
+            self._log(f"    {v:3s} {url:52s} HTTP {r.status_code}  {cuerpo}")
+            self.bitacora.append({"version": v, "url": url,
+                                  "codigo": r.status_code, "cuerpo": cuerpo})
+
+            if r.status_code == 200:
                 try:
-                    r = self.s.get(url, headers=self._cab(nombre), timeout=TIMEOUT)
-                except requests.RequestException as e:
-                    raise HoldedError(f"Sin conexion con api.holded.com: {e}")
+                    r.json()
+                except ValueError:
+                    self._log("        responde 200 pero no es JSON, no vale")
+                    continue
+                self.version = v
+                self._log(f"  [OK] API {v} operativa")
+                return v
 
-                cuerpo = (r.text or "").strip().replace("\n", " ")[:90]
-                self._log(f"  {nombre:14s} {corto:34s} {r.status_code:>6}  {cuerpo}")
-                self.bitacora.append({"modo": nombre, "url": corto,
-                                      "codigo": r.status_code, "cuerpo": cuerpo})
+            if r.status_code == 403:
+                raise HoldedError(
+                    f"La clave es valida pero le faltan permisos (403) en {url}.\n"
+                    f"En Holded > Configuracion > Desarrolladores > Credenciales,\n"
+                    f"edita el token y marca los ambitos de LECTURA de ventas,\n"
+                    f"compras, contactos, tesoreria y contabilidad.\n"
+                    f"Respuesta: {cuerpo}")
+            time.sleep(0.2)
 
-                if r.status_code == 200:
-                    self.modo = nombre
-                    self._log("  " + "-" * 78)
-                    self._log(f"  [OK] Holded responde con la cabecera '{nombre}' "
-                              f"en {corto}")
-                    return nombre
-                if r.status_code in (401, 403):
-                    vistos_401 = True
-                time.sleep(0.15)
-
-        detalle = "\n".join(
-            f"    {b['modo']:14s} {b['url']:34s} {b['codigo']}  {b['cuerpo']}"
-            for b in self.bitacora)
-        if vistos_401:
-            raise HoldedError(
-                "Holded responde 401/403: el token existe pero no tiene permisos.\n"
-                "Ve a Holded > Ajustes > Desarrolladores > Credenciales y comprueba\n"
-                "que el token tenga LECTURA sobre Facturacion, Contactos, Tesoreria\n"
-                "y Contabilidad. Detalle de los intentos:\n" + detalle)
+        detalle = "\n".join(f"    {b['version']} {b['codigo']}  {b['cuerpo']}"
+                            for b in self.bitacora)
         raise HoldedError(
-            "Ninguna combinacion ha devuelto 200, y no hay ningun 401/403, asi que\n"
-            "el problema es de formato de peticion o de plan, no de permisos.\n"
-            "Detalle de los intentos:\n" + detalle)
+            "La clave no funciona ni contra la API v2 ni contra la v1.\n"
+            "Si empieza por 'pat_' es de la API nueva: revisa que este activa y\n"
+            "con permisos en Holded > Configuracion > Desarrolladores.\n"
+            "Ojo: Holded devuelve 400 (no 401) cuando la clave no vale.\n"
+            f"Intentos:\n{detalle}")
 
     # -----------------------------------------------------------------------
     def get(self, url: str, **params):
-        modo = self.autenticar()
+        v = self.autenticar()
         for intento in range(4):
             try:
-                r = self.s.get(url, headers=self._cab(modo), params=params,
-                               timeout=TIMEOUT)
+                r = self.s.get(url, headers=self._cab(v), params=params, timeout=TIMEOUT)
             except requests.RequestException as e:
-                self._log(f"    [aviso] error de red: {e}")
+                self._log(f"    [aviso] red: {e}")
                 time.sleep(2 ** intento)
                 continue
-
             if r.status_code == 200:
                 try:
                     return r.json()
                 except ValueError:
-                    self._log(f"    [aviso] {url} no devuelve JSON")
                     return None
             if r.status_code in (429, 500, 502, 503, 504):
                 espera = 2 ** intento
                 self._log(f"    HTTP {r.status_code}, reintento en {espera}s")
                 time.sleep(espera)
                 continue
-            # 400 / 404: ese endpoint no aplica a esta cuenta. No es fatal.
+            if r.status_code == 403:
+                self._log(f"    [PERMISOS] 403 en {url}: al token le falta ese ambito")
+                return None
             self._log(f"    [aviso] HTTP {r.status_code} en {url} "
-                      f"-> {(r.text or '')[:140].strip()}")
+                      f"-> {(r.text or '')[:120].strip()}")
             return None
         return None
 
     # -----------------------------------------------------------------------
-    def paginar(self, url: str, etiqueta: str = "", **params) -> list:
+    def listar(self, recurso: str, candidatos: list[str], **params) -> list:
         """
-        Recorre paginas hasta agotar. Corta por lista vacia, por lote corto y
-        tambien por repeticion: si el endpoint ignora 'page', devolveria
-        siempre lo mismo y entrariamos en bucle.
+        Descarga un recurso completo probando rutas candidatas hasta acertar.
+        Pagina por cursor en v2 y por page en v1.
         """
+        v = self.autenticar()
+        base = BASE_V2 if v == "v2" else BASE_V1
+
+        ruta = self.rutas.get(recurso)
+        pendientes = [ruta] if ruta else candidatos
+
+        for cand in pendientes:
+            url = cand if cand.startswith("http") else f"{base}/{cand.lstrip('/')}"
+            datos = (self._paginar_cursor(url, **params) if v == "v2"
+                     else self._paginar_page(url, **params))
+            if datos is not None:
+                self.rutas[recurso] = cand
+                self._log(f"  {recurso}: {len(datos)} registros  ({cand})")
+                return datos
+
+        self._log(f"  [aviso] {recurso}: ninguna ruta ha respondido "
+                  f"({', '.join(candidatos)})")
+        return []
+
+    # -----------------------------------------------------------------------
+    def _paginar_cursor(self, url: str, **params) -> list | None:
+        """API v2: {items, cursor, has_more}. Devuelve None si la ruta no existe."""
+        salida, cursor, vueltas = [], None, 0
+        while True:
+            p = dict(params); p["limit"] = LIMITE
+            if cursor:
+                p["cursor"] = cursor
+            d = self.get(url, **p)
+            if d is None:
+                return salida if salida else None
+            if isinstance(d, list):                    # por si devuelve lista pelada
+                salida.extend(d)
+                return salida
+            items = d.get("items") or d.get("data") or []
+            salida.extend(items)
+            cursor = d.get("cursor")
+            vueltas += 1
+            if vueltas == 1 or vueltas % 10 == 0:
+                self._log(f"    pagina {vueltas:>3}  total {len(salida)}")
+            if not cursor or not d.get("has_more", bool(cursor)) or not items:
+                break
+            time.sleep(PAUSA)
+            if vueltas > 400:
+                self._log("    [aviso] corte de seguridad a 400 paginas")
+                break
+        return salida
+
+    def _paginar_page(self, url: str, **params) -> list | None:
+        """API v1: paginacion por page. Corta tambien por repeticion."""
         salida, vistos, page = [], set(), 1
         while True:
-            lote = self.get(url, page=page, **params)
-            if isinstance(lote, dict):
-                lote = lote.get("data") or lote.get("items") or lote.get("results") or []
-            if not lote:
+            d = self.get(url, page=page, **params)
+            if d is None:
+                return salida if salida else None
+            if isinstance(d, dict):
+                d = d.get("data") or d.get("items") or []
+            if not d:
                 break
-
             nuevos = 0
-            for x in lote:
-                ident = (x.get("id") or x.get("_id") or
-                         x.get("docNumber") or repr(x)[:120]) if isinstance(x, dict) else repr(x)[:120]
+            for x in d:
+                ident = ((x.get("id") or x.get("_id") or repr(x)[:120])
+                         if isinstance(x, dict) else repr(x)[:120])
                 if ident in vistos:
                     continue
-                vistos.add(ident)
-                salida.append(x)
-                nuevos += 1
-
-            self._log(f"    pagina {page:>3}  +{nuevos:<4} nuevos   total {len(salida)}")
+                vistos.add(ident); salida.append(x); nuevos += 1
             if nuevos == 0:
-                self._log("    (el endpoint ignora la paginacion, se corta aqui)")
                 break
-            if len(lote) < 50:
+            if len(d) < 50:
                 break
             page += 1
             time.sleep(PAUSA)
-            if page > 500:
-                self._log("    [aviso] corte de seguridad a 500 paginas")
+            if page > 400:
                 break
-        if etiqueta:
-            self._log(f"  {etiqueta}: {len(salida)} registros")
         return salida

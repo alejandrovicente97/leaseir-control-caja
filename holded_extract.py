@@ -4,22 +4,23 @@
 ============================================================================
  LEASEIR - Extraccion de Holded
 ============================================================================
- Trae de Holded todo lo que el forecast de caja necesita:
+ Trae lo que el forecast de caja necesita:
 
-   ventas    facturas y abonos de venta de los ultimos 4 anos
-   compras   facturas y abonos de compra, mismo rango
-   caja      cuentas de tesoreria con sus saldos y sus movimientos
-   apoyo     contactos y libro diario
+   ventas    facturas, abonos y tickets de los ultimos 4 anos
+   compras   facturas de compra y reembolsos, mismo rango
+   caja      cuentas bancarias con sus saldos y sus movimientos
+   apoyo     contactos, pagos y libro diario
 
- Corre en GitHub Actions cada manana. Tambien vale en local:
+ Funciona contra la API v2 de Holded (tokens pat_, Bearer) y contra la v1
+ obsoleta, segun lo que sea la clave. Ver holded_client.py.
 
      export HOLDED_API_KEY=...
      python holded_extract.py --anos 4
-     python holded_extract.py --probar        # solo sondea y sale
+     python holded_extract.py --probar      # solo detecta version y sale
 
- Principio: ningun bloque opcional tumba la extraccion. Si Holded no sirve un
- tipo de documento, se avisa, se deja vacio y se sigue. Solo se falla si no
- hay forma de autenticarse o si no llega ni una factura.
+ Ningun bloque opcional tumba la extraccion: si un recurso no responde se
+ avisa, se deja vacio y se sigue. Solo se falla si no hay forma de
+ autenticarse o si no llega ni una factura.
 ============================================================================
 """
 from __future__ import annotations
@@ -32,12 +33,11 @@ from datetime import datetime, date
 from pathlib import Path
 
 try:
-    import requests  # noqa: F401  (lo usa holded_client)
+    import requests  # noqa: F401
 except ImportError:
     sys.exit("Falta la libreria requests.  Ejecuta:  pip install requests")
 
-from holded_client import (Holded, HoldedError, ts,
-                           BASE_INVOICING, BASE_ACCOUNTING)
+from holded_client import Holded, HoldedError, ts, BASE_V1, BASE_V1_CONTA
 
 API_KEY = os.environ.get("HOLDED_API_KEY", "").strip()
 
@@ -47,112 +47,104 @@ DESTINO_DEFECTO = Path(os.environ.get(
     / "General" / "Leaseir - Finance" / "2026" / "19. Control Caja" / "_data_holded"
 ))
 
-# (clave interna, tipo de documento en Holded, imprescindible)
-DOCUMENTOS = [
-    ("facturas_venta",  "invoice",        True),
-    ("abonos_venta",    "creditnote",     False),
-    ("facturas_compra", "purchase",       True),
-    ("abonos_compra",   "purchaserefund", False),
-    ("recibos_venta",   "salesreceipt",   False),
-]
+# Rutas candidatas por recurso. La referencia de Holded lista los endpoints por
+# titulo y no por path, asi que se prueban varios nombres razonables en vez de
+# apostar por uno. El cliente recuerda el que responde.
+RECURSOS_V2 = {
+    "facturas_venta":  (["invoices", "sales/invoices"], True),
+    "abonos_venta":    (["credit-notes", "sales/credit-notes", "sales-refunds",
+                         "salesrefunds", "rectificative-invoices"], False),
+    "recibos_venta":   (["sales-receipts", "salesreceipts", "receipts"], False),
+    "facturas_compra": (["purchases", "purchase-invoices", "expenses"], True),
+    "abonos_compra":   (["purchase-refunds", "purchaserefunds",
+                         "purchases/refunds"], False),
+    "contactos":       (["contacts"], False),
+    "pagos":           (["payments"], False),
+    "libro_diario":    (["accounting/entries", "accounting/journal-entries",
+                         "journal-entries", "dailyledger"], False),
+}
+RECURSOS_V1 = {
+    "facturas_venta":  ([f"{BASE_V1}/documents/invoice"], True),
+    "abonos_venta":    ([f"{BASE_V1}/documents/creditnote"], False),
+    "recibos_venta":   ([f"{BASE_V1}/documents/salesreceipt"], False),
+    "facturas_compra": ([f"{BASE_V1}/documents/purchase"], True),
+    "abonos_compra":   ([f"{BASE_V1}/documents/purchaserefund"], False),
+    "contactos":       ([f"{BASE_V1}/contacts"], False),
+    "pagos":           ([f"{BASE_V1}/payments"], False),
+    "libro_diario":    ([f"{BASE_V1_CONTA}/dailyledger"], False),
+}
+TESORERIA_V2 = ["treasuries", "treasury", "bank-accounts"]
+TESORERIA_V1 = [f"{BASE_V1}/treasury"]
 
 
-# ---------------------------------------------------------------------------
 def extraer(cli: Holded, desde: date, hasta: date) -> dict:
-    t0, t1 = ts(desde), ts(hasta)
-    d: dict = {}
-    avisos: list[str] = []
+    v = cli.autenticar()
+    recursos = RECURSOS_V2 if v == "v2" else RECURSOS_V1
+    tesoreria = TESORERIA_V2 if v == "v2" else TESORERIA_V1
+    # la v1 filtra por timestamp; la v2 no documenta ese parametro, se trae todo
+    ventana = {} if v == "v2" else {"starttmp": ts(desde), "endtmp": ts(hasta)}
 
-    print("\n  DOCUMENTOS")
-    for clave, tipo, obligatorio in DOCUMENTOS:
-        print(f"  > {clave} ({tipo})")
-        # Primero con ventana temporal; si Holded la rechaza, sin ella.
-        lote = cli.paginar(f"{BASE_INVOICING}/documents/{tipo}",
-                           etiqueta=clave, starttmp=t0, endtmp=t1)
-        if not lote:
-            print(f"    reintento de {clave} sin ventana temporal")
-            lote = cli.paginar(f"{BASE_INVOICING}/documents/{tipo}", etiqueta=clave)
-        d[clave] = lote or []
+    d, avisos = {}, []
+
+    print(f"\n  DOCUMENTOS  (API {v})")
+    for clave, (candidatos, obligatorio) in recursos.items():
+        print(f"  > {clave}")
+        d[clave] = cli.listar(clave, candidatos, **ventana)
         if not d[clave]:
-            msg = f"{clave} ({tipo}) ha venido vacio"
-            avisos.append(msg)
+            avisos.append(f"{clave} ha venido vacio")
             if obligatorio:
-                print(f"    [ATENCION] {msg} y es imprescindible")
-
-    print("\n  CONTACTOS")
-    d["contactos"] = cli.paginar(f"{BASE_INVOICING}/contacts", etiqueta="contactos") or []
-    if not d["contactos"]:
-        # en algunas cuentas van separados
-        for alt in ("customers", "suppliers"):
-            extra = cli.paginar(f"{BASE_INVOICING}/{alt}", etiqueta=alt)
-            d["contactos"].extend(extra or [])
+                print(f"    [ATENCION] {clave} esta vacio y es imprescindible")
 
     print("\n  TESORERIA")
-    cuentas = cli.get(f"{BASE_INVOICING}/treasury")
-    if isinstance(cuentas, dict):
-        cuentas = cuentas.get("data") or cuentas.get("items") or []
-    d["cuentas_tesoreria"] = cuentas or []
-    print(f"    {len(d['cuentas_tesoreria'])} cuentas")
-    for c in d["cuentas_tesoreria"]:
+    cuentas = cli.listar("cuentas_tesoreria", tesoreria)
+    d["cuentas_tesoreria"] = cuentas
+    for c in cuentas:
         if isinstance(c, dict):
             print(f"      - {c.get('name')}  saldo {c.get('balance')}")
-    if not d["cuentas_tesoreria"]:
-        avisos.append("no se han podido leer las cuentas de tesoreria: "
-                      "la posicion bancaria y el cuadre quedaran sin datos")
+    if not cuentas:
+        avisos.append("sin cuentas bancarias: la posicion y el cuadre se quedan sin base")
 
     movs = []
-    for c in d["cuentas_tesoreria"]:
+    for c in cuentas:
         if not isinstance(c, dict):
             continue
         cid = c.get("id") or c.get("_id")
         if not cid:
             continue
         nombre = c.get("name", cid)
-        lote = None
-        for patron in (f"{BASE_INVOICING}/treasury/{cid}/movements",
-                       f"{BASE_INVOICING}/treasury/{cid}/transactions",
-                       f"{BASE_INVOICING}/treasury/movements"):
-            lote = cli.paginar(patron, etiqueta=f"movs {nombre}",
-                               starttmp=t0, endtmp=t1)
-            if lote:
-                break
-        for m in (lote or []):
+        if v == "v2":
+            cands = [f"treasuries/{cid}/movements",
+                     f"treasuries/{cid}/bank-movements",
+                     f"treasuries/{cid}/cash-movements"]
+        else:
+            cands = [f"{BASE_V1}/treasury/{cid}/movements"]
+        lote = cli.listar(f"movs::{cid}", cands, **ventana)
+        for m in lote:
             if isinstance(m, dict):
                 m["_cuenta_id"] = cid
                 m["_cuenta_nombre"] = nombre
-        movs.extend(lote or [])
+        movs.extend(lote)
     d["movimientos_tesoreria"] = movs
     if not movs:
-        avisos.append("sin movimientos de tesoreria: el cuadre contra banco "
-                      "quedara como 'pendiente'")
-
-    print("\n  CONTABILIDAD")
-    d["libro_diario"] = cli.paginar(f"{BASE_ACCOUNTING}/dailyledger",
-                                    etiqueta="libro diario",
-                                    starttmp=t0, endtmp=t1) or []
+        avisos.append("sin movimientos bancarios: el cuadre contra banco "
+                      "quedara como pendiente")
 
     d["_avisos"] = avisos
     return d
 
 
-# ---------------------------------------------------------------------------
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Extraccion de Holded para el forecast de caja")
-    ap.add_argument("--anos", type=int, default=4,
-                    help="anos de historico de ventas y compras (por defecto 4)")
-    ap.add_argument("--desde", default=None,
-                    help="fecha inicio YYYY-MM-DD (manda sobre --anos)")
-    ap.add_argument("--hasta", default=None, help="fecha fin YYYY-MM-DD")
-    ap.add_argument("--destino", default=None, help="carpeta de salida")
-    ap.add_argument("--probar", action="store_true",
-                    help="solo sondea la API y sale, sin descargar nada")
+    ap = argparse.ArgumentParser(description="Extraccion de Holded")
+    ap.add_argument("--anos", type=int, default=4)
+    ap.add_argument("--desde", default=None)
+    ap.add_argument("--hasta", default=None)
+    ap.add_argument("--destino", default=None)
+    ap.add_argument("--probar", action="store_true")
     args = ap.parse_args()
 
     hoy = date.today()
-    if args.desde:
-        desde = datetime.strptime(args.desde, "%Y-%m-%d").date()
-    else:
-        desde = date(hoy.year - args.anos, 1, 1)
+    desde = (datetime.strptime(args.desde, "%Y-%m-%d").date() if args.desde
+             else date(hoy.year - args.anos, 1, 1))
     hasta = (datetime.strptime(args.hasta, "%Y-%m-%d").date() if args.hasta
              else date(hoy.year + 2, 12, 31))
 
@@ -171,17 +163,16 @@ def main() -> None:
         sys.exit(1)
 
     if args.probar:
-        print("\n  Sondeo correcto. No se descarga nada (--probar).")
+        print("\n  Deteccion correcta. No se descarga nada (--probar).")
         return
 
     datos = extraer(cli, desde, hasta)
-
     conteos = {k: len(v) for k, v in datos.items() if isinstance(v, list)}
     datos["_meta"] = {
         "extraido_en": datetime.now().isoformat(timespec="seconds"),
         "desde": str(desde), "hasta": str(hasta),
-        "modo_auth": cli.modo, "conteos": conteos,
-        "avisos": datos.get("_avisos", []),
+        "api": cli.version, "rutas": cli.rutas,
+        "conteos": conteos, "avisos": datos.get("_avisos", []),
     }
 
     destino = Path(args.destino) if args.destino else DESTINO_DEFECTO
@@ -191,17 +182,15 @@ def main() -> None:
         json.dump(datos, f, ensure_ascii=False, indent=1, default=str)
 
     print("\n" + "-" * 80)
-    for k, v in conteos.items():
-        print(f"  {k:26s} {v:>8,}")
+    for k, val in conteos.items():
+        print(f"  {k:26s} {val:>8,}")
     print("-" * 80)
     for a in datos["_meta"]["avisos"]:
         print(f"  [aviso] {a}")
     print(f"  Guardado en {salida}  ({salida.stat().st_size / 1e6:.1f} MB)")
 
-    ventas = len(datos.get("facturas_venta") or [])
-    compras = len(datos.get("facturas_compra") or [])
-    if ventas == 0 and compras == 0:
-        print("\n  [ERROR] Ni una factura de venta ni de compra. Algo va mal.")
+    if not (datos.get("facturas_venta") or datos.get("facturas_compra")):
+        print("\n  [ERROR] Ni una factura de venta ni de compra.")
         sys.exit(1)
 
 
