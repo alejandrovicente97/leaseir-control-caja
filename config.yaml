@@ -233,6 +233,11 @@ cuadre:
   # aqui: dejarlos dentro mueve el unlevered esa cifra sin que nadie sepa de
   # que. Se sacan y el panel dice cuanto queda por clasificar.
   cuentas_suspenso: ["555", "554"]
+
+  # Numero de cuentas distintas a partir del cual un asiento del 1 de enero se
+  # considera el de apertura del ejercicio y no un movimiento. Con 3,5 millones
+  # en juego -eso valia la apertura de 2026- conviene que sea explicito.
+  lineas_apertura: 20
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 

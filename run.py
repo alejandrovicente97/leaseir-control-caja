@@ -141,6 +141,9 @@ def main() -> None:
         graves.append("El calendario de cobros de Eli ha venido vacio.")
     for a in datos.get("avisos_origen") or []:
         calidad.append(f"Aviso de la extraccion: {a}")
+    # avisos que levanta el motor al calcular (asiento de apertura, etc.)
+    for a in dict.fromkeys(getattr(m, "avisos", []) or []):
+        calidad.append(a)
     if graves:
         print("\n  [ATENCION] " + " / ".join(graves))
 

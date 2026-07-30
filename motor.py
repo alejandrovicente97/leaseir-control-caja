@@ -432,6 +432,38 @@ class MotorCaja:
         salida["_detalle"] = detalle
         return salida
 
+    def _sin_apertura(self, m: pd.DataFrame) -> pd.DataFrame:
+        """
+        Quita el asiento de apertura del ejercicio.
+
+        El 1 de enero la contabilidad abre el ano cargando en cada cuenta de
+        activo su saldo inicial. Eso toca las cuentas de banco por 3,5 millones
+        y NO es un movimiento de caja: es el saldo que ya estaba ahi el 31 de
+        diciembre. Contarlo hacia que enero de 2026 diera una variacion de caja
+        de +3.519.990 cuando la caja de LT en realidad bajo 32.709 ese mes.
+
+        Se reconoce por lo que es: un unico asiento, el primer dia del
+        ejercicio, que toca a la vez muchisimas cuentas distintas. Ningun cobro
+        ni ningun pago se parece a eso.
+        """
+        if m.empty or "asiento" not in m.columns:
+            return m
+        primeros = m[m["fecha"].map(
+            lambda f: bool(f) and getattr(f, "month", 0) == 1
+            and getattr(f, "day", 0) == 1)]
+        if primeros.empty:
+            return m
+        umbral = int((self.cfg.get("cuadre") or {}).get("lineas_apertura", 20))
+        apertura = {a for a, g in primeros.groupby("asiento")
+                    if g["cuenta"].nunique() >= umbral}
+        if not apertura:
+            return m
+        self.avisos.append(
+            f"Se ha excluido el asiento de apertura del ejercicio "
+            f"({len(apertura)} asiento(s) del 1 de enero con mas de {umbral} "
+            f"cuentas): es el saldo que venia del ano anterior, no un flujo.")
+        return m[~m["asiento"].isin(apertura)]
+
     def caja_por_naturaleza(self, mes: str | None = None) -> pd.DataFrame:
         """
         Los movimientos de caja del mes, clasificados por su contrapartida.
@@ -448,7 +480,7 @@ class MotorCaja:
         dia = self.d.get("diario")
         if dia is None or dia.empty:
             return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
-        m = dia[dia["mes"] == (mes or self.mes)]
+        m = self._sin_apertura(dia[dia["mes"] == (mes or self.mes)])
         if m.empty:
             return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
 
@@ -493,7 +525,7 @@ class MotorCaja:
         dia = self.d.get("diario")
         if dia is None or dia.empty:
             return None
-        m = dia[dia["mes"] == (mes or self.mes)]
+        m = self._sin_apertura(dia[dia["mes"] == (mes or self.mes)])
         if m.empty:
             return None
         es_caja = m["cuenta"].astype(str).str.match(r"^5[74]")
@@ -543,10 +575,22 @@ class MotorCaja:
                           .reset_index())
         top_fuera = top_fuera.reindex(
             top_fuera["importe"].abs().sort_values(ascending=False).index).head(12)
+        # El detalle de lo que hay en las cuentas puente, apunte a apunte. Son
+        # 131.119 euros en julio: mientras sea un total no se puede clasificar,
+        # y hasta que no se clasifique el unlevered del mes no esta cerrado.
+        sp = c[c["es_susp"]].copy()
+        sp["nat"] = sp["asiento"].map(nat)
+        det_susp = [{"fecha": str(r["fecha"]), "cuenta": r["cta_contra"],
+                     "nombre": r.get("nom_contra") or r["nat"],
+                     "concepto": r["concepto"], "banco": r.get("cuenta_nombre", ""),
+                     "importe": float(r["importe"])}
+                    for _, r in sp.sort_values("importe", key=abs,
+                                               ascending=False).iterrows()]
         return {
             "variacion_caja": variacion,
             "financiacion": financiacion,
             "suspenso": suspenso,
+            "detalle_suspenso": det_susp,
             "unlevered": variacion - financiacion - suspenso,
             "detalle_financiacion": [
                 {"cuenta": r["cta_contra"], "concepto": r["nat"],
@@ -740,6 +784,7 @@ class MotorCaja:
             eje["variacion_caja"] = ul["variacion_caja"]
             eje["financiacion"] = ul["financiacion"]
             eje["suspenso"] = ul["suspenso"]
+            eje["detalle_suspenso"] = ul["detalle_suspenso"]
             eje["detalle_financiacion"] = ul["detalle_financiacion"]
             eje["fuera_perimetro"] = ul["fuera_perimetro"]
             eje["fcf"] = ul["unlevered"]

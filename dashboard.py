@@ -760,6 +760,22 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         # Lo que se ha quedado fuera del perimetro, por si falta alguna cuenta
         # que si deberia estar. Donde se pone esa frontera mueve la cifra
         # entera, asi que se ensena en vez de darla por buena.
+        # Los 131.119 de la 555, apunte a apunte: es lo que hay que clasificar
+        ds = eje.get("detalle_suspenso") or []
+        if ds:
+            t_puente += (
+                f'<details open><summary>Los {eur(eje["suspenso"])} sin aplicar, '
+                f'apunte a apunte — {len(ds)} movimiento'
+                f'{"s" if len(ds) != 1 else ""}</summary>'
+                + tabla(["Fecha", "Cuenta", "Nombre", "Concepto en el banco",
+                         "Importe"],
+                        [[esc(x["fecha"]), f'<code>{esc(x["cuenta"])}</code>',
+                          esc(x["nombre"]), esc(x["concepto"]),
+                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
+                          f'{eur(x["importe"])}</span>'] for x in ds],
+                        alineacion=["", "", "", "", "r"])
+                + '</details>')
+
         fp = eje.get("fuera_perimetro") or []
         if fp:
             t_puente += (

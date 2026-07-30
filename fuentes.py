@@ -116,7 +116,7 @@ COLS_REAL = ["fecha", "mes", "sentido", "tercero", "num", "doc_id", "importe",
              "banco", "concepto", "conciliado", "tipo_api"]
 COLS_PLAN = ["numero", "nombre", "grupo", "debe", "haber", "saldo"]
 COLS_DIARIO = ["fecha", "mes", "asiento", "linea", "cuenta", "cuenta_nombre",
-               "grupo_pgc", "concepto", "doc", "debe", "haber", "importe"]
+               "grupo_pgc", "concepto", "doc", "tipo", "debe", "haber", "importe"]
 
 
 # Grupos del Plan General Contable, por el primer digito o los tres primeros.
@@ -439,6 +439,7 @@ def desde_holded(ruta: Path) -> dict:
             "grupo_pgc": grupo_pgc(cta),
             "concepto": str(_pri(e, "description", "desc", defecto=""))[:90],
             "doc": str(_pri(e, "doc_description", "docDescription", defecto=""))[:90],
+            "tipo": str(_pri(e, "type", "tipo", defecto="") or ""),
             "debe": debe, "haber": haber,
             # signo de caja: en una cuenta de banco el debe entra y el haber sale
             "importe": debe - haber,
