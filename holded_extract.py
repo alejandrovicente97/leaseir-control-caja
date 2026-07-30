@@ -69,13 +69,20 @@ RECURSOS_V2 = {
     # cuadrar el pendiente de cobro contra contabilidad: el saldo de las 430*
     # tiene que ser lo exigible hoy mas lo aplazado segun el calendario.
     "plan_contable":   (["accounting-accounts"], False),
-    # Libro diario. La ruta buena es /ledger-entries: antes se probaban nombres
-    # inventados (accounting/entries, dailyledger...) y volvia vacio, que no es
-    # lo mismo que no existir. Es la fuente mas completa de cobros y pagos
-    # ejecutados: cada apunte lleva cuenta contable, fecha y debe/haber, asi que
-    # el ejecutado del mes se puede cuadrar contra contabilidad y no solo
-    # contra lo que /payments haya conciliado.
+    # Libro diario. Dos motivos por los que volvia vacio, y ninguno era que no
+    # existiera: la ruta buena es /ledger-entries (no accounting/entries ni
+    # dailyledger, que me invente), y start_date y end_date son OBLIGATORIOS.
+    # Sin ellos responde 400 y el bloque se quedaba a cero sin decir por que.
+    # Es la fuente mas completa de cobros y pagos: cada apunte lleva su cuenta
+    # del plan contable, asi que un movimiento de banco deja de ser un texto
+    # ("EMISION REMESA SEPA SDD 0049") y pasa a tener contrapartida.
     "libro_diario":    (["ledger-entries"], False),
+}
+
+# Parametros propios de algun recurso, aparte de la ventana general.
+PARAMS_V2 = {
+    "libro_diario": lambda desde, hasta: {"start_date": str(desde),
+                                          "end_date": str(hasta)},
 }
 RECURSOS_V1 = {
     "facturas_venta":  ([f"{BASE_V1}/documents/invoice"], True),
@@ -107,7 +114,11 @@ def extraer(cli: Holded, desde: date, hasta: date) -> dict:
     print(f"\n  DOCUMENTOS  (API {v})")
     for clave, (candidatos, obligatorio) in recursos.items():
         print(f"  > {clave}")
-        d[clave] = cli.listar(clave, candidatos, **ventana)
+        extra = PARAMS_V2.get(clave) if v == "v2" else None
+        p = dict(ventana)
+        if extra:
+            p.update(extra(desde, hasta))
+        d[clave] = cli.listar(clave, candidatos, **p)
         if not d[clave]:
             avisos.append(f"{clave} ha venido vacio")
             if obligatorio:

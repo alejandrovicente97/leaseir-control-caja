@@ -113,8 +113,41 @@ COLS_DOC = ["id", "num", "tercero", "cuenta", "fecha", "vencimiento", "total",
             "liquidado", "pendiente", "estado", "estado_api", "fecha_liq",
             "mes_venc", "mes_factura", "tipologia"]
 COLS_REAL = ["fecha", "mes", "sentido", "tercero", "num", "doc_id", "importe",
-             "banco", "concepto", "conciliado"]
+             "banco", "concepto", "conciliado", "tipo_api"]
 COLS_PLAN = ["numero", "nombre", "grupo", "debe", "haber", "saldo"]
+COLS_DIARIO = ["fecha", "mes", "asiento", "linea", "cuenta", "grupo_pgc",
+               "concepto", "doc", "debe", "haber", "importe"]
+
+
+# Grupos del Plan General Contable, por el primer digito o los tres primeros.
+# Sirve para que un movimiento de banco deje de ser un texto y tenga naturaleza:
+# "EMISION REMESA SEPA SDD 0049" contra la 430 es un cobro de clientes.
+GRUPOS_PGC = [
+    ("400", "Proveedores"), ("401", "Proveedores, efectos"),
+    ("410", "Acreedores"),  ("411", "Acreedores, efectos"),
+    ("430", "Clientes"),    ("431", "Clientes, efectos"),
+    ("432", "Clientes, factoring"), ("436", "Clientes de dudoso cobro"),
+    ("440", "Deudores"),    ("465", "Remuneraciones pendientes"),
+    ("460", "Anticipos de remuneraciones"),
+    ("470", "Hacienda deudora"), ("475", "Hacienda acreedora"),
+    ("476", "Seguridad Social acreedora"), ("471", "Seguridad Social deudora"),
+    ("520", "Deudas a corto con entidades de credito"),
+    ("523", "Proveedores de inmovilizado a corto"),
+    ("527", "Intereses de deudas a corto"),
+    ("170", "Deudas a largo con entidades de credito"),
+    ("572", "Bancos"), ("570", "Caja"), ("574", "Bancos"),
+    ("640", "Sueldos y salarios"), ("642", "Seguridad Social a cargo empresa"),
+    ("621", "Arrendamientos"), ("623", "Servicios profesionales"),
+    ("624", "Transportes"),
+]
+
+
+def grupo_pgc(cuenta) -> str:
+    c = re.sub(r"\D", "", str(cuenta or ""))
+    for pref, nombre in GRUPOS_PGC:
+        if c.startswith(pref):
+            return nombre
+    return f"Grupo {c[:1]}" if c else "Sin cuenta"
 COLS_BANCO = ["cuenta", "saldo", "tipo", "limite"]
 COLS_MOV = ["cuenta", "fecha", "importe", "concepto"]
 
@@ -318,12 +351,16 @@ def desde_holded(ruta: Path) -> dict:
             fac = idx_compra[doc_id]
             sentido = "pago"
         else:
+            # Sin documento que lo respalde NO se adivina el sentido. Holded
+            # manda el importe siempre en positivo, asi que dar por cobro todo
+            # lo que no case metia en "cobros realizados" las cuotas de
+            # tarjeta, los peajes, los impuestos y las transferencias a
+            # proveedores. Alejandro lo vio de un vistazo: "eso que marcas como
+            # cobros son pagos".
+            # Un apunte mal firmado es peor que un apunte que falta: el que
+            # falta se busca, el mal firmado se cree. Van a su propio cajon.
             fac = None
-            tipo = norm(str(_pri(p, "document_type", "documentType", "type",
-                                 defecto=""))).lower()
-            sentido = ("pago" if ("purchase" in tipo or "compra" in tipo
-                                  or "expense" in tipo or importe < 0)
-                       else "cobro")
+            sentido = "sin_documento"
 
         realizados.append({
             "fecha": fecha,
@@ -333,8 +370,13 @@ def desde_holded(ruta: Path) -> dict:
                 p, "contact_name", "contactName", defecto="(sin tercero)"),
             "num": (fac or {}).get("num") or "(sin factura)",
             "doc_id": doc_id,
-            # se guarda con signo de caja: los cobros entran, los pagos salen
-            "importe": abs(importe) * (1 if sentido == "cobro" else -1),
+            # signo de caja: los cobros entran, los pagos salen. Sin documento
+            # no hay signo fiable, se deja el valor absoluto tal cual y el
+            # panel lo muestra aparte sin sumarlo a ningun total.
+            "importe": (abs(importe) if sentido == "cobro"
+                        else -abs(importe) if sentido == "pago" else importe),
+            "tipo_api": str(_pri(p, "type", "document_type", "documentType",
+                                 defecto="")),
             "banco": cuentas_nom.get(str(_pri(p, "bank_account_id", "bankAccountId",
                                               "treasuryId", defecto="")), ""),
             "concepto": str(_pri(p, "description", "desc", "notes", defecto=""))[:90],
@@ -358,6 +400,28 @@ def desde_holded(ruta: Path) -> dict:
             "saldo":  num(_pri(c, "balance", "saldo", defecto=0)),
         })
 
+    # ---- libro diario -----------------------------------------------------
+    diario = []
+    for e in d.get("libro_diario", []) or []:
+        if not isinstance(e, dict):
+            continue
+        f = a_fecha(_pri(e, "date", "entryDate", "fecha"))
+        debe = num(_pri(e, "debit", "debe", defecto=0))
+        haber = num(_pri(e, "credit", "haber", defecto=0))
+        cta = _pri(e, "account", "accountNumber", "cuenta", defecto="")
+        diario.append({
+            "fecha": f, "mes": mes_de(f),
+            "asiento": _pri(e, "entry_number", "entryNumber", defecto=""),
+            "linea": _pri(e, "line", defecto=""),
+            "cuenta": str(cta),
+            "grupo_pgc": grupo_pgc(cta),
+            "concepto": str(_pri(e, "description", "desc", defecto=""))[:90],
+            "doc": str(_pri(e, "doc_description", "docDescription", defecto=""))[:90],
+            "debe": debe, "haber": haber,
+            # signo de caja: en una cuenta de banco el debe entra y el haber sale
+            "importe": debe - haber,
+        })
+
     movs = []
     for m in d.get("movimientos_tesoreria", []) or []:
         if not isinstance(m, dict):
@@ -379,6 +443,7 @@ def desde_holded(ruta: Path) -> dict:
         "movimientos": pd.DataFrame(movs, columns=COLS_MOV),
         "realizados": pd.DataFrame(realizados, columns=COLS_REAL),
         "plan_contable": pd.DataFrame(plan, columns=COLS_PLAN),
+        "diario": pd.DataFrame(diario, columns=COLS_DIARIO),
         "origen": f"API de Holded ({sello})",
         "avisos_origen": meta.get("avisos", []),
     }
@@ -457,6 +522,7 @@ def desde_excel(f_cobros: Path, f_forecast: Path) -> dict:
         # solo existe con la API. Vacio PERO CON COLUMNAS.
         "realizados": pd.DataFrame(columns=COLS_REAL),
         "plan_contable": pd.DataFrame(columns=COLS_PLAN),
+        "diario": pd.DataFrame(columns=COLS_DIARIO),
         "origen": f"Excel {f_forecast.name}",
     }
 

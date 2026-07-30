@@ -218,6 +218,11 @@ cuadre:
   # de factoring. Si el saldo de estas cuentas no es exigible + aplazado, o el
   # calendario de Eli esta mal cargado o hay facturas fuera de alcance.
   cuentas_clientes: ["430", "431", "432", "435", "436"]
+
+  # Lo que hay que quitar de la variacion de caja para que sea UNLEVERED:
+  # principal de prestamos y polizas, intereses y gastos financieros, y
+  # movimientos con socios. Es la misma frontera que usa el bottom-up.
+  cuentas_financiacion: ["17", "52", "527", "66", "55"]
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 

@@ -147,6 +147,7 @@ def main() -> None:
     meta = {"origen": datos["origen"], "bancos": datos["bancos"], "calidad": calidad,
             "realizados": m.realizados_mes(),
             "check_clientes": m.check_clientes(),
+            "caja_naturaleza": m.caja_por_naturaleza(),
             "ocultar_saldo_cero": (cfg.get("tesoreria") or {}).get(
                 "ocultar_saldo_cero", True),
             "aviso_limites": (cfg.get("tesoreria") or {}).get("aviso_limites"),

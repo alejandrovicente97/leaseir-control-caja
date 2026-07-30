@@ -432,6 +432,102 @@ class MotorCaja:
         salida["_detalle"] = detalle
         return salida
 
+    def caja_por_naturaleza(self, mes: str | None = None) -> pd.DataFrame:
+        """
+        Los movimientos de caja del mes, clasificados por su contrapartida.
+
+        En el libro diario, un cobro o un pago es un apunte que toca una cuenta
+        de banco (57*). Lo que dice QUE es ese movimiento son las otras lineas
+        del mismo asiento: contra 430 es un cobro de cliente, contra 640 una
+        nomina, contra 475 un impuesto, contra 520 una amortizacion de deuda.
+
+        Es lo que convierte "EMISION REMESA SEPA SDD REFERENCIA: 0049" en
+        "Clientes", y lo que permite decir de que se compone el residuo del
+        cuadre en vez de dejarlo como una diferencia sin explicar.
+        """
+        dia = self.d.get("diario")
+        if dia is None or dia.empty:
+            return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
+        m = dia[dia["mes"] == (mes or self.mes)]
+        if m.empty:
+            return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
+
+        es_caja = m["cuenta"].astype(str).str.match(r"^5[74]")
+        caja, resto = m[es_caja], m[~es_caja]
+        if caja.empty:
+            return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
+
+        # contrapartida de cada asiento: la linea de mayor importe que no es caja
+        contra = {}
+        for asiento, g in resto.groupby("asiento"):
+            i = g["importe"].abs().idxmax()
+            contra[asiento] = g.loc[i, "grupo_pgc"]
+
+        c = caja.copy()
+        c["naturaleza"] = c["asiento"].map(lambda a: contra.get(a, "Sin contrapartida"))
+        g = (c.groupby("naturaleza")
+               .agg(importe=("importe", "sum"), apuntes=("importe", "size"))
+               .reset_index())
+        return g.reindex(g["importe"].abs().sort_values(ascending=False).index)
+
+    def unlevered_ejecutado(self, mes: str | None = None) -> dict | None:
+        """
+        El unlevered FCF ya ejecutado del mes, calculado como lo calcula el
+        bottom-up: de la variacion real de caja hacia arriba.
+
+            variacion de caja del mes  -  movimientos de financiacion  =  unlevered
+
+        Por que no vale sumar cobros de facturas menos pagos de facturas: esa
+        cuenta coge casi todos los cobros pero solo los pagos que pasan por
+        factura o que reconozco por el concepto. Los impuestos, las comisiones
+        y todo lo que no lleva factura se quedaban fuera, y el ejecutado salia
+        alto de forma sistematica. Alejandro lo vio: le salia -250k y aqui
+        +100k.
+
+        Financiacion es lo que hay que quitar para que sea unlevered:
+        principal de prestamos y polizas (17*, 52*), intereses y gastos
+        financieros (66*, 527) y las aportaciones/retiradas de socios (55*).
+        Los traspasos entre cuentas propias se anulan solos al sumar todas las
+        lineas de tesoreria.
+        """
+        dia = self.d.get("diario")
+        if dia is None or dia.empty:
+            return None
+        m = dia[dia["mes"] == (mes or self.mes)]
+        if m.empty:
+            return None
+        es_caja = m["cuenta"].astype(str).str.match(r"^5[74]")
+        caja, resto = m[es_caja], m[~es_caja]
+        if caja.empty:
+            return None
+
+        pref_fin = tuple(str(p) for p in
+                         (self.cfg.get("cuadre") or {}).get("cuentas_financiacion")
+                         or ["17", "52", "527", "66", "55"])
+        contra, nat = {}, {}
+        for asiento, g in resto.groupby("asiento"):
+            i = g["importe"].abs().idxmax()
+            contra[asiento] = str(g.loc[i, "cuenta"])
+            nat[asiento] = g.loc[i, "grupo_pgc"]
+
+        c = caja.copy()
+        c["cta_contra"] = c["asiento"].map(lambda a: contra.get(a, ""))
+        c["es_fin"] = c["cta_contra"].map(
+            lambda x: str(x).startswith(pref_fin))
+
+        variacion = float(c["importe"].sum())
+        financiacion = float(c[c["es_fin"]]["importe"].sum())
+        det = (c[c["es_fin"]].assign(nat=c["asiento"].map(nat))
+               .groupby("nat")["importe"].sum().sort_values())
+        return {
+            "variacion_caja": variacion,
+            "financiacion": financiacion,
+            "unlevered": variacion - financiacion,
+            "detalle_financiacion": [{"concepto": k, "importe": float(v)}
+                                     for k, v in det.items()],
+            "n_apuntes": int(len(c)),
+        }
+
     def realizados_mes(self, mes: str | None = None) -> pd.DataFrame:
         """Cobros y pagos liquidados del mes, factura a factura."""
         r = self.d.get("realizados")
@@ -570,6 +666,8 @@ class MotorCaja:
         rea = self.realizados_mes()
         cob_eje = float(rea[rea["sentido"] == "cobro"]["importe"].sum()) if not rea.empty else 0.0
         pag_fac = float(rea[rea["sentido"] == "pago"]["importe"].sum()) if not rea.empty else 0.0
+        sin_doc = (rea[rea["sentido"] == "sin_documento"] if not rea.empty
+                   else rea)
         pag_fij = -sum(float(v) for k, v in pagado.items() if k != "_detalle")
         eje = {
             "cobros": cob_eje,
@@ -579,8 +677,25 @@ class MotorCaja:
             "fcf": cob_eje + pag_fac + pag_fij,
             "n_cobros": int((rea["sentido"] == "cobro").sum()) if not rea.empty else 0,
             "n_pagos": int((rea["sentido"] == "pago").sum()) if not rea.empty else 0,
+            "n_sin_doc": int(len(sin_doc)),
+            "importe_sin_doc": float(sin_doc["importe"].abs().sum()) if len(sin_doc) else 0.0,
         }
         m0 = out[self.meses[0]]
+        # Si hay libro diario, el ejecutado bueno es el que sale de la caja
+        # real: coge TODO lo que ha salido del banco, no solo lo que pasa por
+        # factura o lo que reconozco por el concepto. La cuenta por facturas se
+        # queda como desglose, que para eso sirve.
+        ul = self.unlevered_ejecutado()
+        if ul:
+            eje["por_facturas"] = eje["fcf"]
+            eje["variacion_caja"] = ul["variacion_caja"]
+            eje["financiacion"] = ul["financiacion"]
+            eje["detalle_financiacion"] = ul["detalle_financiacion"]
+            eje["fcf"] = ul["unlevered"]
+            eje["fuente"] = "libro diario"
+        else:
+            eje["fuente"] = "facturas y extracto"
+
         eje["cierre_mes_fcf"] = eje["fcf"] + m0["fcf"]
         eje["saldo_cierre_mes"] = saldo_cta + m0["fcf"]
 

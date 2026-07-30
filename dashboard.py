@@ -305,7 +305,10 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
             eur(eje.get("fcf", 0)),
-            f"Cobrado {eur(eje.get('cobros', 0))} · pagado {eur(eje.get('pagos', 0))}",
+            (f"Caja {eur(eje.get('variacion_caja', 0))} menos financiación "
+             f"{eur(eje.get('financiacion', 0))}"
+             if eje.get("fuente") == "libro diario" else
+             f"Cobrado {eur(eje.get('cobros', 0))} · pagado {eur(eje.get('pagos', 0))}"),
             est_fcf),
         kpi(f"Saldo proyectado a cierre de {m0['etiqueta']}", eur(saldo_cierre),
             f"quedan {eur(m0['fcf'])} de flujo por delante", est_fin),
@@ -528,6 +531,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     rea = meta.get("realizados")
     det_cob_hechos = realizados_desplegable(rea, "cobro")
     det_pag_hechos = realizados_desplegable(rea, "pago")
+    det_sin_doc = realizados_desplegable(rea, "sin_documento")
+    n_sin_doc = eje.get("n_sin_doc", 0)
+    imp_sin_doc = eur(eje.get("importe_sin_doc", 0))
     etiqueta_m0 = m0["etiqueta"]
     tot_cob_hechos = eur(eje.get("cobros", 0))
     tot_pag_hechos = eur(eje.get("pagos_factura", 0))
@@ -591,6 +597,44 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         t_check = ('<p class="vacio">Sin plan contable. Requiere el permiso '
                    '<code>accounting:chart-of-accounts.read</code> en el token '
                    'de Holded.</p>')
+
+    # ---- caja del mes por naturaleza contable -----------------------------
+    cn = meta.get("caja_naturaleza")
+    if cn is not None and not cn.empty:
+        f_cn = [[esc(r["naturaleza"]),
+                 f'<span class="{"neg" if r["importe"] < 0 else ""}">{eur(r["importe"])}</span>',
+                 f'{int(r["apuntes"])}'] for _, r in cn.iterrows()]
+        f_cn.append(["<b>Variación de caja del mes</b>",
+                     f'<b>{eur(float(cn["importe"].sum()))}</b>', ""])
+        t_nat = tabla(["Contrapartida", "Importe", "Apuntes"], f_cn,
+                      alineacion=["", "r", "r"],
+                      clases=[""] * (len(f_cn) - 1) + ["total"])
+    else:
+        t_nat = ('<p class="vacio">Sin libro diario. Requiere el permiso '
+                 '<code>accounting:daily-ledger.read</code> en el token.</p>')
+
+    # ---- puente hasta el unlevered ejecutado ------------------------------
+    if eje.get("fuente") == "libro diario":
+        f_pu = [["Variación real de caja del mes", eur(eje["variacion_caja"])]]
+        for x in eje.get("detalle_financiacion") or []:
+            f_pu.append([f"&nbsp;&nbsp;{esc(x['concepto'])}",
+                         f'<span class="{"neg" if x["importe"] < 0 else ""}">'
+                         f'{eur(x["importe"])}</span>'])
+        f_pu += [["Financiación incluida en esa variación",
+                  f'<span class="{"neg" if eje["financiacion"] < 0 else ""}">'
+                  f'{eur(eje["financiacion"])}</span>'],
+                 ["<b>Unlevered FCF ejecutado</b> = variación − financiación",
+                  f'<b>{eur(eje["fcf"])}</b>'],
+                 ["Para contrastar: la misma cifra contando solo facturas",
+                  eur(eje.get("por_facturas", 0))]]
+        cl_pu = [""] * (len(f_pu) - 3) + ["sub", "total", ""]
+        t_puente = tabla(["Concepto", "Importe"], f_pu,
+                         alineacion=["", "r"], clases=cl_pu)
+    else:
+        t_puente = ('<p class="vacio">Sin libro diario: el ejecutado se calcula '
+                    'con facturas y extracto, que no ve los pagos sin factura '
+                    '(impuestos, comisiones). Requiere el permiso '
+                    '<code>accounting:daily-ledger.read</code>.</p>')
 
     # ---- avisos de calidad del dato ---------------------------------------
     dq = meta.get("calidad", [])
@@ -938,6 +982,23 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   </section>
 
   <section>
+    <h2>Cómo se llega al unlevered ejecutado de {etiqueta_m0}</h2>
+    <p class="h2n">Igual que en el bottom-up: de la variación real de caja hacia
+     arriba, quitando lo que es financiación. La cuenta por facturas se queda
+     como desglose, pero no como cifra: solo ve los pagos que llevan factura.</p>
+    {t_puente}
+  </section>
+
+  <section>
+    <h2>Caja de {etiqueta_m0} por naturaleza contable</h2>
+    <p class="h2n">De qué se compone el movimiento de caja del mes, según la
+     contrapartida de cada asiento en el libro diario. Es lo que convierte una
+     línea de extracto en un concepto: contra 430 es cobro de cliente, contra
+     640 una nómina, contra 520 amortización de deuda.</p>
+    {t_nat}
+  </section>
+
+  <section>
     <h2>Posición bancaria</h2>
     {t_ban}
   </section>
@@ -1018,6 +1079,19 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
       <input type="text" id="bph" placeholder="Filtrar proveedor…" oninput="filtrar('p3h', this.value)">
     </div>
     <div id="p3h" class="detalles">{det_pag_hechos}</div>
+  </section>
+
+  <section>
+    <h2>Apuntes de {etiqueta_m0} sin documento asociado</h2>
+    <p class="h2n">{n_sin_doc} apuntes por {imp_sin_doc} en total que no van
+     ligados a ninguna factura: cuotas de tarjeta, peajes, impuestos, traspasos.
+     Holded manda el importe siempre en positivo, así que sin documento detrás
+     <b>no se puede saber el signo</b> y no se suman a cobros ni a pagos. El
+     unlevered ejecutado sí los recoge, porque sale de la caja real.</p>
+    <div class="buscador">
+      <input type="text" id="bsd" placeholder="Filtrar…" oninput="filtrar('psd', this.value)">
+    </div>
+    <div id="psd" class="detalles">{det_sin_doc}</div>
   </section>
 
   <section>
