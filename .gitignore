@@ -1,0 +1,11 @@
+holded.key
+.env
+datos/
+publicado/
+historico/
+calendario_eli.xlsx
+holded*.json
+__pycache__/
+*.pyc
+*.xlsx
+caja_leaseir.html
