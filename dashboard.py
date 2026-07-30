@@ -58,6 +58,10 @@ P = {
 def eur(x, dec=0) -> str:
     if x is None:
         return "—"
+    # sin esto salen "-0 €" cuando el importe es -0,004: un menos delante de un
+    # cero, en un panel financiero, hace dudar de todo lo demas
+    if abs(x) < 0.5 / (10 ** dec):
+        x = 0.0
     s = f"{x:,.{dec}f}".replace(",", " ")
     return s + " €"
 
@@ -274,16 +278,32 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     vencido = float(prov["vencido"].sum()) if not prov.empty else 0.0
     saldo_fin = L[meses[-1]]["saldo_proyectado"]
 
-    est_fcf = "ok" if m0["fcf"] >= 0 else "mal"
-    est_fin = "ok" if saldo_fin > 200_000 else ("aviso" if saldo_fin > 0 else "mal")
+    eje = fc.get("ejecutado") or {}
+    saldo_cierre = eje.get("saldo_cierre_mes", m0["saldo_proyectado"])
+
+    est_fcf = "ok" if eje.get("fcf", 0) >= 0 else "mal"
+    est_fin = "ok" if saldo_cierre > 200_000 else ("aviso" if saldo_cierre > 0 else "mal")
+
+    # Nota de pólizas. Holded no publica el limite, asi que sin limite escrito
+    # en config no se puede decir el disponible. Decir "+ 0 €" seria mentir por
+    # omision: se lee como que no hay financiacion, y no es lo mismo que no
+    # saberlo.
+    sin_lim = fc.get("polizas_sin_limite") or []
+    if fc.get("polizas_limite"):
+        nota_pol = f"+ {eur(fc['polizas_disponible'])} disponible en pólizas"
+    elif sin_lim:
+        nota_pol = f"pólizas: {esc(', '.join(sin_lim))}, límite sin configurar"
+    else:
+        nota_pol = "sin pólizas"
 
     kpis = "".join([
-        kpi("Posición bancaria hoy", eur(fc["saldo_actual"]),
-            f"+ {eur(fc['polizas_disponible'])} en pólizas"),
-        kpi(f"Unlevered FCF {m0['etiqueta']}", eur(m0["fcf"]),
-            f"Cash in {eur(m0['cash_in'])} · out {eur(m0['cash_out'])}", est_fcf),
-        kpi(f"Saldo proyectado a {etiquetas[-1]}", eur(saldo_fin),
-            "sin tirar de pólizas", est_fin),
+        kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
+        kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
+            eur(eje.get("fcf", 0)),
+            f"Cobrado {eur(eje.get('cobros', 0))} · pagado {eur(eje.get('pagos', 0))}",
+            est_fcf),
+        kpi(f"Saldo proyectado a cierre de {m0['etiqueta']}", eur(saldo_cierre),
+            f"quedan {eur(m0['fcf'])} de flujo por delante", est_fin),
         kpi("Pendiente de cobro exigible", eur(pend_cobro),
             f"de los cuales {eur(retraso)} en retraso",
             "aviso" if retraso > 300_000 else ""),
@@ -302,6 +322,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     for et, k, cl in [
         ("Cobro de clientes", "cobro_clientes", ""),
         ("Rentings sin facturar", "rentings_sin_factura", ""),
+        # Facturas FM: vienen de la fusion con LML. Estan facturadas, solo que
+        # en otra sociedad, asi que no pueden ir en la linea de "sin facturar".
+        ("Ventas financiadas desde LML (fusión)", "ventas_fusion_lml", ""),
         ("Ventas comprometidas sin facturar", "ventas_sin_facturar", ""),
         ("Ajustes sobre cobros", "ajustes_cobros", ""),
         ("CASH IN", "cash_in", "b"),
@@ -444,13 +467,85 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     # ---- bancos -----------------------------------------------------------
     b = meta.get("bancos")
+    NOM_TIPO = {"poliza": "Póliza", "tarjeta": "Tarjeta", "cuenta": "Cuenta"}
     if b is not None and not b.empty:
-        f_b = [[esc(r["cuenta"]),
-                "Póliza" if r["tipo"] == "poliza" else "Cuenta",
-                eur(r["saldo"])] for _, r in b.iterrows()]
-        t_ban = tabla(["Cuenta", "Tipo", "Saldo"], f_b)
+        # Las cuentas y tarjetas a cero no aportan nada y son mayoria: de 36
+        # cuentas en Holded, casi todas estan a cero. Se dice cuantas se ocultan
+        # para que nadie piense que falta una.
+        ocultar = meta.get("ocultar_saldo_cero", True)
+        vis = b[b["saldo"].abs() > 0.005] if ocultar else b
+        n_cero = len(b) - len(vis)
+        f_b = [[esc(r["cuenta"]), NOM_TIPO.get(r["tipo"], "Cuenta"), eur(r["saldo"])]
+               for _, r in vis.iterrows()]
+        t_ban = tabla(["Cuenta", "Tipo", "Saldo"], f_b) if f_b else \
+            '<p class="vacio">Todas las cuentas a cero.</p>'
+        if n_cero:
+            t_ban += (f'<p class="vacio">{n_cero} cuenta{"s" if n_cero != 1 else ""} '
+                      f'a cero no se muestra{"n" if n_cero != 1 else ""}.</p>')
     else:
         t_ban = '<p class="vacio">Sin cuentas.</p>'
+
+    # ---- cobros y pagos YA REALIZADOS del mes -----------------------------
+    # Sale de /payments, el libro de liquidaciones de Holded: cada apunte lleva
+    # el documento al que va, asi que el desglose llega hasta la factura sin
+    # deducirlo de la fecha de liquidacion, que solo guarda la del ultimo pago
+    # y se lleva por delante los cobros parciales.
+    def realizados_desplegable(rea, sentido):
+        if rea is None or rea.empty:
+            return ('<p class="vacio">Sin apuntes de liquidación en el mes. '
+                    'Si esperabas verlos, revisa que el token tenga permiso '
+                    'de lectura sobre pagos.</p>')
+        f = rea[rea["sentido"] == sentido]
+        if f.empty:
+            return '<p class="vacio">Ninguno en el mes.</p>'
+        grupos = []
+        for terc, g in sorted(f.groupby("tercero"),
+                              key=lambda kv: -abs(kv[1]["importe"].sum())):
+            filas = [[esc(str(r["fecha"])), esc(r["num"]), esc(r["banco"]),
+                      esc(r["concepto"]),
+                      f'<span class="{"neg" if r["importe"] < 0 else ""}">'
+                      f'{eur(r["importe"])}</span>']
+                     for _, r in g.sort_values("fecha").iterrows()]
+            grupos.append((terc, f'<b>{eur(g["importe"].sum())}</b>', filas))
+        return detalle_desplegable(
+            grupos, ["Fecha", "Factura", "Banco", "Concepto", "Importe"],
+            alineacion=["", "", "", "", "r"])
+
+    rea = meta.get("realizados")
+    det_cob_hechos = realizados_desplegable(rea, "cobro")
+    det_pag_hechos = realizados_desplegable(rea, "pago")
+    etiqueta_m0 = m0["etiqueta"]
+    tot_cob_hechos = eur(eje.get("cobros", 0))
+    tot_pag_hechos = eur(eje.get("pagos_factura", 0))
+    n_cob_hechos = eje.get("n_cobros", 0)
+    n_pag_hechos = eje.get("n_pagos", 0)
+    s_cob = "s" if n_cob_hechos != 1 else ""
+    s_pag = "s" if n_pag_hechos != 1 else ""
+
+    # Las partidas fijas del mes en curso: previsto, ya pagado y lo que queda.
+    fij = fc.get("fijos_pagados") or {}
+    NOM_FIJO = {"salarios": "Salarios y Seguridad Social",
+                "cuotas_sl": "Cuotas S&amp;L y renting bancario",
+                "recurrentes": "Gastos recurrentes",
+                "otros_fijos": "Otros pagos fijos"}
+    f_fij, det_fij = [], fij.get("_detalle") or {}
+    for k, nom in NOM_FIJO.items():
+        hecho = float(fij.get(k, 0) or 0)
+        queda = abs(float(m0.get({"salarios": "salarios", "cuotas_sl": "cuotas_sl",
+                                  "recurrentes": "recurrentes_proyectados",
+                                  "otros_fijos": "otros_fijos"}[k], 0)))
+        if hecho or queda:
+            f_fij.append([nom, eur(hecho + queda), eur(-hecho), eur(-queda)])
+    t_fijos = (tabla(["Partida", "Previsto del mes", "Ya pagado", "Queda por pagar"],
+                     f_fij, alineacion=["", "r", "r", "r"])
+               if f_fij else '<p class="vacio">Sin partidas fijas.</p>')
+
+    f_fij_det = [[esc(str(x["fecha"])), esc(NOM_FIJO.get(k, k)), esc(x["concepto"]),
+                  f'<span class="neg">{eur(x["importe"])}</span>']
+                 for k, lista in det_fij.items() for x in lista]
+    t_fijos_det = (tabla(["Fecha", "Partida", "Concepto en el banco", "Importe"],
+                         sorted(f_fij_det), alineacion=["", "", "", "r"])
+                   if f_fij_det else "")
 
     # ---- avisos de calidad del dato ---------------------------------------
     dq = meta.get("calidad", [])
@@ -822,6 +917,16 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   </section>
 
   <section>
+    <h2>Cobros ya realizados en {etiqueta_m0}</h2>
+    <p class="h2n">Lo que ha entrado de verdad entre el día 1 y hoy, apunte a
+     apunte y ligado a su factura. Total {tot_cob_hechos} en {n_cob_hechos} apunte{s_cob}.</p>
+    <div class="buscador">
+      <input type="text" id="bch" placeholder="Filtrar cliente…" oninput="filtrar('p2h', this.value)">
+    </div>
+    <div id="p2h" class="detalles">{det_cob_hechos}</div>
+  </section>
+
+  <section>
     <h2>Detalle factura a factura</h2>
     <p class="h2n">Despliega cada cliente para ver sus facturas: importe, cuánto
      debería estar cobrado a día de hoy, cuánto se ha cobrado y qué queda.</p>
@@ -849,6 +954,25 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
     <p class="h2n">El forecast de cada mes recoge todo lo pendiente con vencimiento
      hasta fin de ese mes, así que los vencidos se arrastran al mes en curso.</p>
     {g_pag}
+  </section>
+
+  <section>
+    <h2>Pagos ya realizados en {etiqueta_m0}</h2>
+    <p class="h2n">Lo que ha salido de verdad entre el día 1 y hoy, apunte a apunte
+     y ligado a su factura. Total {tot_pag_hechos} en {n_pag_hechos} apunte{s_pag}.</p>
+    <div class="buscador">
+      <input type="text" id="bph" placeholder="Filtrar proveedor…" oninput="filtrar('p3h', this.value)">
+    </div>
+    <div id="p3h" class="detalles">{det_pag_hechos}</div>
+  </section>
+
+  <section>
+    <h2>Partidas fijas de {etiqueta_m0}: lo pagado y lo que queda</h2>
+    <p class="h2n">Las nóminas y las cuotas de S&amp;L no salen todas el mismo día.
+     Lo ya pagado está descontado del saldo de hoy, así que el forecast del mes
+     solo proyecta la parte que falta: si no, se contaría dos veces.</p>
+    {t_fijos}
+    {t_fijos_det}
   </section>
 
   <section>

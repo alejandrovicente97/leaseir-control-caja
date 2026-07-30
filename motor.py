@@ -203,10 +203,21 @@ class MotorCaja:
                     if "num" in self.ventas.columns and not self.ventas.empty else set())
         cal = self.cal.copy()
         cal["k"] = cal["factura"].map(norm)
-        futuro = cal[(~cal["k"].isin(emitidas)) & (cal["mes"].isin(self.meses))]
+        futuro = cal[(~cal["k"].isin(emitidas)) & (cal["mes"].isin(self.meses))].copy()
         if futuro.empty:
-            return pd.DataFrame(columns=["cliente", "mes", "importe"])
-        return (futuro.groupby(["cliente", "mes"])["importe"].sum()
+            return pd.DataFrame(columns=["cliente", "mes", "importe", "tipo"])
+
+        # Las facturas que empiezan por FM vienen de la fusion con LML: son
+        # ventas financiadas desde LML cuya factura no se pudo migrar al Holded
+        # de LT. No estan en Holded, pero NO son "pendientes de facturar":
+        # estan facturadas, solo que en otra sociedad. Cobran igual, asi que
+        # entran en el forecast, pero con su nombre. Llamarlas "sin facturar"
+        # invitaria a ir a buscar una factura que ya existe.
+        pref = tuple(p.upper() for p in
+                     (self.cfg["cobros"].get("prefijos_fusion") or ["FM"]))
+        futuro["tipo"] = futuro["factura"].map(
+            lambda f: "fusion" if str(f).strip().upper().startswith(pref) else "renting")
+        return (futuro.groupby(["cliente", "mes", "tipo"])["importe"].sum()
                 .reset_index().sort_values("importe", ascending=False))
 
     # =======================================================================
@@ -333,6 +344,65 @@ class MotorCaja:
     # =======================================================================
     #  FORECAST CONSOLIDADO
     # =======================================================================
+    #  LO QUE YA HA PASADO ESTE MES
+    # =======================================================================
+    def ya_pagado_fijos(self) -> dict:
+        """
+        Cuanto se ha pagado YA en el mes en curso de cada partida fija.
+
+        Sin esto el mes en curso se cuenta dos veces: la nomina de julio sale
+        del banco el dia 25, el saldo de hoy ya la lleva descontada, y aun asi
+        el forecast volvia a restar los 266.070 enteros. Lo mismo con las
+        cuotas de sale & leaseback, que no vencen todas el mismo dia.
+
+        Se mira contra los movimientos reales del banco, no contra facturas:
+        una nomina no tiene factura en Holded.
+        """
+        mov = self.d.get("movimientos")
+        patrones = (self.cfg.get("ejecutado") or {}).get("patrones") or {}
+        vacio = {k: 0.0 for k in patrones}
+        vacio["_detalle"] = {}
+        if mov is None or mov.empty or not patrones:
+            return vacio
+
+        m = mov.copy()
+        m["mes"] = m["fecha"].map(mes_de)
+        m = m[(m["mes"] == self.mes) & (m["importe"] < 0)]
+        if m.empty:
+            return vacio
+
+        salida, detalle, usados = {}, {}, set()
+        for bloque, claves in patrones.items():
+            claves = [norm(str(k)).lower() for k in (claves or [])]
+            filas = []
+            for idx, r in m.iterrows():
+                if idx in usados:
+                    continue                       # un apunte cuenta una sola vez
+                c = norm(str(r["concepto"])).lower()
+                if any(k and k in c for k in claves):
+                    usados.add(idx); filas.append(r)
+            salida[bloque] = float(sum(abs(f["importe"]) for f in filas))
+            detalle[bloque] = [{"fecha": f["fecha"], "concepto": f["concepto"],
+                                "importe": float(f["importe"])} for f in filas]
+        salida["_detalle"] = detalle
+        return salida
+
+    def realizados_mes(self, mes: str | None = None) -> pd.DataFrame:
+        """Cobros y pagos liquidados del mes, factura a factura."""
+        r = self.d.get("realizados")
+        if r is None or r.empty:
+            return pd.DataFrame(columns=["fecha", "mes", "sentido", "tercero",
+                                         "num", "importe", "banco", "concepto"])
+        f = r[r["mes"] == (mes or self.mes)].copy()
+        # la intercompania tampoco es caja aqui: mismo criterio que en forecast
+        fuera = {norm(p) for p in (self.cfg.get("pagos") or {}).get(
+            "excluir_proveedores") or []}
+        fuera |= {norm(c) for c in self.cfg["cobros"].get("excluir_clientes") or []}
+        if fuera and not f.empty:
+            f = f[~f["tercero"].map(norm).isin(fuera)]
+        return f.sort_values(["sentido", "fecha", "tercero"])
+
+    # =======================================================================
     def forecast(self) -> dict:
         cli = self.cobros_por_cliente()
         rent = self.rentings_sin_factura()
@@ -347,10 +417,24 @@ class MotorCaja:
         aj_neg = sum(x["importe"] for x in cob_cfg.get("ajustes_negativos") or [])
         aj_pos = sum(x["importe"] for x in cob_cfg.get("ajustes_positivos") or [])
 
+        # Partidas fijas ya pagadas en el mes en curso: se descuentan de lo que
+        # queda por pagar. Si no, se cuentan dos veces (una en el saldo de hoy,
+        # que ya las lleva descontadas, y otra en el forecast del mes).
+        pagado = self.ya_pagado_fijos()
+        self.fijos_ya_pagados = pagado
+
+        def resto(previsto: float, bloque: str) -> float:
+            """Lo que falta por pagar de una partida fija, nunca menos de cero."""
+            hecho = float(pagado.get(bloque, 0.0))
+            queda = max(0.0, abs(previsto) - hecho)
+            return -queda
+
         out = {}
         for i, m in enumerate(self.meses):
             c_cli = float(cli[f"teorico_{m}"].sum()) if not cli.empty else 0.0
-            c_ren = float(rent[rent["mes"] == m]["importe"].sum()) if not rent.empty else 0.0
+            rm = rent[rent["mes"] == m] if not rent.empty else rent
+            c_ren = float(rm[rm["tipo"] == "renting"]["importe"].sum()) if not rm.empty else 0.0
+            c_fus = float(rm[rm["tipo"] == "fusion"]["importe"].sum()) if not rm.empty else 0.0
             # las ventas sin facturar y los ajustes solo aplican al mes en curso
             c_sf = sin_fact if i == 0 else 0.0
             c_aj = (aj_neg + aj_pos) if i == 0 else 0.0
@@ -358,21 +442,28 @@ class MotorCaja:
             p_prov = float(prov[f"pago_{m}"].sum()) if not prov.empty else 0.0
             p_recu = float(recu[recu["mes"] == m]["proyectado"].sum()) if not recu.empty else 0.0
             p_otros = -self.cfg["otros_pagos_fijos"]
+            p_sal, p_sl = sal, sl
+            if i == 0:
+                p_sal = resto(sal, "salarios")
+                p_sl = resto(sl, "cuotas_sl")
+                p_recu = resto(p_recu, "recurrentes")
+                p_otros = resto(p_otros, "otros_fijos")
 
-            cash_in = c_cli + c_ren + c_sf + c_aj
-            cash_out = -abs(p_prov) + p_recu + sal + sl + p_otros
+            cash_in = c_cli + c_ren + c_fus + c_sf + c_aj
+            cash_out = -abs(p_prov) + p_recu + p_sal + p_sl + p_otros
 
             out[m] = {
                 "mes": m, "etiqueta": nombre_mes(m),
                 "cobro_clientes": c_cli,
                 "rentings_sin_factura": c_ren,
+                "ventas_fusion_lml": c_fus,
                 "ventas_sin_facturar": c_sf,
                 "ajustes_cobros": c_aj,
                 "cash_in": cash_in,
                 "pago_proveedores": -abs(p_prov),
                 "recurrentes_proyectados": p_recu,
-                "salarios": sal,
-                "cuotas_sl": sl,
+                "salarios": p_sal,
+                "cuotas_sl": p_sl,
                 "otros_fijos": p_otros,
                 "cash_out": cash_out,
                 "fcf": cash_in + cash_out,
@@ -381,7 +472,27 @@ class MotorCaja:
         # posicion bancaria y proyeccion de saldo
         b = self.d["bancos"]
         saldo_cta = float(b[b["tipo"] == "cuenta"]["saldo"].sum()) if not b.empty else 0.0
-        disp_pol = float(b[b["tipo"] == "poliza"]["saldo"].sum()) if not b.empty else 0.0
+
+        # POLIZAS. El saldo que da Holded es lo DISPUESTO, en negativo. El
+        # disponible es limite - dispuesto, y el limite no lo publica la API:
+        # sale de config.yaml. Sin limite configurado el disponible es
+        # DESCONOCIDO, que no es lo mismo que cero: cero se lee como "no hay
+        # financiacion" y llevaria a decidir sobre un dato inventado.
+        pol = b[b["tipo"] == "poliza"] if not b.empty else b
+        limites = (self.cfg.get("tesoreria") or {}).get("polizas") or []
+        disp_pol, lim_total, sin_limite = 0.0, 0.0, []
+        for _, r in pol.iterrows():
+            dispuesto = -float(r["saldo"]) if float(r["saldo"]) < 0 else 0.0
+            lim = next((float(x.get("limite") or 0) for x in limites
+                        if norm(str(x.get("cuenta", ""))).lower()
+                        in norm(str(r["cuenta"])).lower()), 0.0)
+            if lim > 0:
+                lim_total += lim
+                disp_pol += lim - dispuesto
+            else:
+                sin_limite.append(f"{r['cuenta']} (dispuesto {dispuesto:,.0f})"
+                                  .replace(",", " "))
+        self.polizas_sin_limite = sin_limite
 
         acum = saldo_cta
         for m in self.meses:
@@ -389,8 +500,31 @@ class MotorCaja:
             out[m]["saldo_proyectado"] = acum
             out[m]["saldo_proyectado_con_polizas"] = acum + disp_pol
 
+        # EJECUTADO DEL MES EN CURSO: lo que ya ha entrado y salido de verdad
+        # entre el dia 1 y hoy. Es el "cuanto llevamos" del mes, y sumado a lo
+        # que queda por delante da el cierre proyectado.
+        rea = self.realizados_mes()
+        cob_eje = float(rea[rea["sentido"] == "cobro"]["importe"].sum()) if not rea.empty else 0.0
+        pag_fac = float(rea[rea["sentido"] == "pago"]["importe"].sum()) if not rea.empty else 0.0
+        pag_fij = -sum(float(v) for k, v in pagado.items() if k != "_detalle")
+        eje = {
+            "cobros": cob_eje,
+            "pagos_factura": pag_fac,
+            "pagos_fijos": pag_fij,
+            "pagos": pag_fac + pag_fij,
+            "fcf": cob_eje + pag_fac + pag_fij,
+            "n_cobros": int((rea["sentido"] == "cobro").sum()) if not rea.empty else 0,
+            "n_pagos": int((rea["sentido"] == "pago").sum()) if not rea.empty else 0,
+        }
+        m0 = out[self.meses[0]]
+        eje["cierre_mes_fcf"] = eje["fcf"] + m0["fcf"]
+        eje["saldo_cierre_mes"] = saldo_cta + m0["fcf"]
+
         return {
             "meses": self.meses, "lineas": out,
+            "ejecutado": eje,
+            "fijos_pagados": pagado,
+            "polizas_limite": lim_total, "polizas_sin_limite": sin_limite,
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
             "detalle": {"salarios": sal_det, "cuotas_sl": sl_det},
             "clientes": cli, "rentings": rent, "proveedores": prov, "recurrentes": recu,

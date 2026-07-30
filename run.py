@@ -145,6 +145,9 @@ def main() -> None:
         print("\n  [ATENCION] " + " / ".join(graves))
 
     meta = {"origen": datos["origen"], "bancos": datos["bancos"], "calidad": calidad,
+            "realizados": m.realizados_mes(),
+            "ocultar_saldo_cero": (cfg.get("tesoreria") or {}).get(
+                "ocultar_saldo_cero", True),
             "problemas_graves": graves,
             "contraste": cfg.get("contraste_excel") or {},
             "cuadre_proyeccion": m.cuadre_proyeccion(fc),

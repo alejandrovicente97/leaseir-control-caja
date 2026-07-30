@@ -233,16 +233,55 @@ class Holded:
                 if salida and len(salida) % LIMITE == 0:
                     # Acabar en un multiplo exacto del limite sin cursor es la
                     # firma de una descarga truncada, no de un recurso agotado.
-                    self.truncados[url] = len(salida)
                     self._log(f"    [SOSPECHA] corta en {len(salida)} (multiplo de "
                               f"{LIMITE}) sin cursor. Claves de la respuesta: "
                               f"{sorted(d.keys()) if isinstance(d, dict) else type(d)}")
+                    extra = self._rescatar(url, salida, **params)
+                    if extra:
+                        salida.extend(extra)
+                    else:
+                        self.truncados[url] = len(salida)
                 break
             time.sleep(PAUSA)
             if vueltas > 400:
                 self._log("    [aviso] corte de seguridad a 400 paginas")
                 break
         return salida
+
+    # -----------------------------------------------------------------------
+    def _rescatar(self, url: str, ya: list, **params) -> list:
+        """
+        Segunda oportunidad cuando un endpoint v2 corta sin devolver cursor.
+
+        Pasa con /credit-notes: devuelve 100 justos y ahi se queda. Y los
+        abonos importan, porque restan del pendiente de cobro: quedarse con
+        los primeros 100 no es perder detalle, es inflar lo que se espera
+        cobrar. Antes de darlo por bueno se prueba paginar a la vieja usanza,
+        por page y por offset, quedandose con lo que traiga ids nuevos.
+        """
+        vistos = {x.get("id") or x.get("_id") for x in ya if isinstance(x, dict)}
+        for nombre in ("page", "offset"):
+            rescatado, n = [], 0
+            for i in range(1, 200):
+                valor = i + 1 if nombre == "page" else i * LIMITE
+                p = dict(params); p["limit"] = LIMITE; p[nombre] = valor
+                d = self.get(url, **p)
+                items = (d.get("items") or d.get("data") or []) if isinstance(d, dict) else (d or [])
+                nuevos = [x for x in items if isinstance(x, dict)
+                          and (x.get("id") or x.get("_id")) not in vistos]
+                if not nuevos:
+                    break
+                for x in nuevos:
+                    vistos.add(x.get("id") or x.get("_id"))
+                rescatado.extend(nuevos); n += 1
+                time.sleep(PAUSA)
+            if rescatado:
+                self._log(f"    [RESCATE] +{len(rescatado)} registros paginando "
+                          f"por '{nombre}' en {n} vueltas")
+                return rescatado
+        self._log("    [RESCATE] ni page ni offset devuelven nada nuevo: "
+                  "se da por completo en 100")
+        return []
 
     def _paginar_page(self, url: str, **params) -> list | None:
         """API v1: paginacion por page. Corta tambien por repeticion."""

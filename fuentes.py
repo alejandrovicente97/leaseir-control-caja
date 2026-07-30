@@ -109,11 +109,32 @@ def nombre_mes(mes: str) -> str:
 # Esquema canonico. Se declara explicitamente para que un bloque vacio de
 # Holded produzca un DataFrame vacio PERO CON COLUMNAS. Sin esto, si un
 # endpoint falla el motor casca con KeyError en lugar de dar cero.
-COLS_DOC = ["num", "tercero", "cuenta", "fecha", "vencimiento", "total",
+COLS_DOC = ["id", "num", "tercero", "cuenta", "fecha", "vencimiento", "total",
             "liquidado", "pendiente", "estado", "estado_api", "fecha_liq",
             "mes_venc", "mes_factura", "tipologia"]
+COLS_REAL = ["fecha", "mes", "sentido", "tercero", "num", "doc_id", "importe",
+             "banco", "concepto", "conciliado"]
 COLS_BANCO = ["cuenta", "saldo", "tipo", "limite"]
 COLS_MOV = ["cuenta", "fecha", "importe", "concepto"]
+
+
+def clasificar_cuenta(nombre: str, tipo_api: str = "") -> str:
+    """
+    cuenta | poliza | tarjeta, a partir del nombre.
+
+    Holded devuelve type="bank" para todo, asi que el nombre es lo unico que
+    distingue. Y el orden importa: "TARJETA NEGOCIOS CREDITO" lleva CREDITO
+    dentro, pero es una tarjeta, no una poliza. Si se mira primero el credito,
+    las tarjetas acaban sumando como disponible de financiacion, que es
+    justo lo contrario de lo que son.
+    """
+    n = norm(nombre).lower()
+    if "tarjeta" in n or "card" in n or "visa" in n or "mastercard" in n:
+        return "tarjeta"
+    if ("poliz" in n or "credit" in n or "linea de credito" in n
+            or "credit" in (tipo_api or "").lower()):
+        return "poliza"
+    return "cuenta"
 
 
 def _clave(k: str) -> str:
@@ -202,6 +223,11 @@ def desde_holded(ruta: Path) -> dict:
                 tags if isinstance(tags, str) else "")
 
             filas.append({
+                # id interno de Holded: es la clave por la que los apuntes de
+                # /payments enganchan con su factura (document_id). Sin el, el
+                # detalle de cobros y pagos realizados no se puede desglosar
+                # hasta factura, solo hasta tercero.
+                "id":          str(_pri(doc, "id", "_id", defecto="")),
                 "num":         _pri(doc, "docNumber", "documentNumber", "invoiceNum",
                                     "number", "id", defecto=""),
                 "tercero":     _pri(doc, "contactName", "contactLegalName", "clientName",
@@ -233,17 +259,79 @@ def desde_holded(ruta: Path) -> dict:
     for c in d.get("cuentas_tesoreria", []) or []:
         if not isinstance(c, dict):
             continue
+        if _pri(c, "archived", defecto=False) in (True, "true", 1):
+            continue
         nombre = _pri(c, "name", "alias", "description", "accountName",
                       defecto="(sin nombre)")
         tipo_api = str(_pri(c, "type", "accountType", "kind", defecto="")).lower()
-        es_poliza = ("poliz" in norm(nombre).lower() or "credit" in tipo_api
-                     or "linea" in norm(nombre).lower())
         bancos.append({
             "cuenta": nombre,
             "saldo": num(_pri(c, "balance", "currentBalance", "currentAmount",
                               "amount", defecto=0)),
-            "tipo": "poliza" if es_poliza else "cuenta",
-            "limite": num(_pri(c, "creditLimit", "limit", defecto=0)),
+            "tipo": clasificar_cuenta(nombre, tipo_api),
+            # Holded NO publica el limite de la poliza: en el esquema de
+            # treasury/accounts no hay ningun campo de limite de credito. Sale
+            # de config.yaml, escrito a mano. Cero aqui significa "sin
+            # configurar", no "sin disponible": son cosas muy distintas y el
+            # dashboard las distingue.
+            "limite": 0.0,
+        })
+
+    # ---- cobros y pagos REALIZADOS ---------------------------------------
+    # /payments es el libro de liquidaciones: cada apunte trae el documento al
+    # que va (document_id), la fecha, el importe y la cuenta. Es la unica forma
+    # de dar el ejecutado del mes desglosado hasta factura sin inventarselo a
+    # partir de la fecha de liquidacion de la factura, que solo guarda la del
+    # ultimo pago y se lleva por delante los cobros parciales.
+    idx_venta = {f["id"]: f for f in ventas if f.get("id")}
+    idx_compra = {f["id"]: f for f in compras if f.get("id")}
+    cuentas_nom = {str(c.get("id") or c.get("_id")): c.get("name")
+                   for c in (d.get("cuentas_tesoreria") or [])
+                   if isinstance(c, dict)}
+
+    realizados = []
+    for p in d.get("pagos", []) or []:
+        if not isinstance(p, dict):
+            continue
+        doc_id = str(_pri(p, "document_id", "documentId", "docId",
+                          "invoice_id", defecto="") or "")
+        fecha = a_fecha(_pri(p, "date", "paymentDate", "valueDate", "createdAt"))
+        importe = num(_pri(p, "amount", "total", "value", defecto=0))
+        if not fecha or abs(importe) < 0.005:
+            continue
+
+        # El sentido se decide por el documento al que apunta, no por el
+        # vocabulario de document_type: asi no depende de como Holded llame
+        # hoy a cada tipo de documento.
+        fac = idx_venta.get(doc_id)
+        if fac is not None:
+            sentido = "cobro"
+        elif doc_id in idx_compra:
+            fac = idx_compra[doc_id]
+            sentido = "pago"
+        else:
+            fac = None
+            tipo = norm(str(_pri(p, "document_type", "documentType", "type",
+                                 defecto=""))).lower()
+            sentido = ("pago" if ("purchase" in tipo or "compra" in tipo
+                                  or "expense" in tipo or importe < 0)
+                       else "cobro")
+
+        realizados.append({
+            "fecha": fecha,
+            "mes": mes_de(fecha),
+            "sentido": sentido,
+            "tercero": (fac or {}).get("tercero") or _pri(
+                p, "contact_name", "contactName", defecto="(sin tercero)"),
+            "num": (fac or {}).get("num") or "(sin factura)",
+            "doc_id": doc_id,
+            # se guarda con signo de caja: los cobros entran, los pagos salen
+            "importe": abs(importe) * (1 if sentido == "cobro" else -1),
+            "banco": cuentas_nom.get(str(_pri(p, "bank_account_id", "bankAccountId",
+                                              "treasuryId", defecto="")), ""),
+            "concepto": str(_pri(p, "description", "desc", "notes", defecto=""))[:90],
+            "conciliado": _pri(p, "reconciliation_status", "reconciliationStatus",
+                               "status", defecto=""),
         })
 
     movs = []
@@ -265,6 +353,7 @@ def desde_holded(ruta: Path) -> dict:
             columns={"tercero": "proveedor"}),
         "bancos": pd.DataFrame(bancos, columns=COLS_BANCO),
         "movimientos": pd.DataFrame(movs, columns=COLS_MOV),
+        "realizados": pd.DataFrame(realizados, columns=COLS_REAL),
         "origen": f"API de Holded ({sello})",
         "avisos_origen": meta.get("avisos", []),
     }
@@ -338,7 +427,10 @@ def desde_excel(f_cobros: Path, f_forecast: Path) -> dict:
         "ventas": ventas,
         "compras": compras,
         "bancos": pd.DataFrame(bancos),
-        "movimientos": pd.DataFrame(columns=["cuenta", "fecha", "importe", "concepto"]),
+        "movimientos": pd.DataFrame(columns=COLS_MOV),
+        # el Excel no lleva libro de liquidaciones: el ejecutado por factura
+        # solo existe con la API. Vacio PERO CON COLUMNAS.
+        "realizados": pd.DataFrame(columns=COLS_REAL),
         "origen": f"Excel {f_forecast.name}",
     }
 

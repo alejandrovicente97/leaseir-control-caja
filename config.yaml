@@ -115,6 +115,13 @@ cobros:
   excluir_clientes:
     - "Leaseir Medical Light, S.L."      # IC, sociedad extinta, no se cobra
 
+  # En la hoja de Eli, las facturas que empiezan por FM vienen de la fusion con
+  # LML: son ventas financiadas desde LML cuya factura no se pudo migrar al
+  # Holded de LT. No estan en Holded, pero NO estan sin facturar: estan
+  # facturadas en otra sociedad y se cobran igual. Entran en el forecast con su
+  # propio nombre, no mezcladas con los rentings pendientes de emitir.
+  prefijos_fusion: ["FM"]
+
 # ---------------------------------------------------------------------------
 # 3.bis PAGOS QUE NO SON CAJA
 # ---------------------------------------------------------------------------
@@ -130,6 +137,52 @@ cobros:
 pagos:
   excluir_proveedores:
     - "Leaseir Medical Light, S.L."      # IC, no sale dinero de la caja
+
+# ---------------------------------------------------------------------------
+# 3.ter TESORERIA: LIMITES DE LAS POLIZAS
+# ---------------------------------------------------------------------------
+# Holded NO publica el limite de credito: en treasury/accounts no existe ese
+# campo. El saldo que si da es lo DISPUESTO (en negativo). Sin limite escrito
+# aqui, el disponible de la poliza no se puede calcular, y el dashboard dice
+# "limite sin configurar" en vez de inventarse un cero que se leeria como
+# "no hay financiacion disponible".
+#
+# El nombre se compara por fragmento, sin acentos ni mayusculas.
+tesoreria:
+  polizas:
+    - { cuenta: "CUENTA CREDITO NEGOCIO SANTANDER", limite: 0 }   # <-- poner el limite real
+  # Las cuentas y tarjetas a cero no se listan en el dashboard: son ruido.
+  # Ponlo en false si prefieres verlas todas.
+  ocultar_saldo_cero: true
+
+# ---------------------------------------------------------------------------
+# 3.quater LO YA PAGADO DEL MES EN CURSO
+# ---------------------------------------------------------------------------
+# La nomina de julio sale del banco el dia 25. El saldo de hoy ya la lleva
+# descontada, asi que volver a restar los 266.070 enteros en el forecast del
+# mes la cuenta dos veces. Igual con las cuotas de S&L, que no vencen todas el
+# mismo dia: en julio no se han pagado todas.
+#
+# Aqui se dice como se reconoce cada partida fija en el extracto bancario. Se
+# busca el fragmento dentro del concepto, sin acentos ni mayusculas, y cada
+# apunte cuenta una sola vez (gana el primer bloque que lo reclama).
+ejecutado:
+  patrones:
+    salarios:
+      - "nomina"
+      - "nominas"
+      - "seguridad social"
+      - "tgss"
+      - "rgss"
+    cuotas_sl:
+      - "amortizacion"
+      - "cargo por amorti"
+      - "renting"
+      - "leasing"
+      - "cuota prestamo"
+      - "vencimiento prestamo"
+    recurrentes: []
+    otros_fijos: []
 
 # ---------------------------------------------------------------------------
 # 4. CLASIFICACION DE CERTIDUMBRE  (el "Mapping Nacho" 1-6)

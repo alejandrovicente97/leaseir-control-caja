@@ -65,8 +65,9 @@ RECURSOS_V2 = {
     # y un aviso de "bloque vacio" que parecia un fallo y no lo era.
     "contactos":       (["contacts"], False),
     "pagos":           (["payments"], False),
-    "libro_diario":    (["accounting/entries", "accounting/journal-entries",
-                         "journal-entries", "dailyledger"], False),
+    # el libro diario no se pide: nadie lo consume y gastaba cuatro 404 por
+    # ejecucion. Si algun dia hace falta para el cuadre, la ruta documentada es
+    # "Listado de asientos contables" en el bloque de CONTABILIDAD.
 }
 RECURSOS_V1 = {
     "facturas_venta":  ([f"{BASE_V1}/documents/invoice"], True),
