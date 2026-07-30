@@ -84,6 +84,28 @@ class Holded:
         orden = ["v2", "v1"] if self.key.startswith("pat_") else ["v1", "v2"]
         pruebas = {"v2": f"{BASE_V2}/invoices", "v1": f"{BASE_V1}/documents/invoice"}
 
+        # Huella de la clave, nunca la clave. Distingue "faltan permisos" de
+        # "el valor pegado en Secrets no es un token": si alguien copia lo que
+        # se ve en pantalla en Holded, pega la version enmascarada pat_..._<XX>
+        # y eso tambien acaba en un 403 que parece de permisos.
+        k = self.key
+        pistas = []
+        if "<" in k or ">" in k:
+            pistas.append("CONTIENE < o > : parece la version ENMASCARADA que "
+                          "Holded muestra en pantalla, no el token real")
+        if k != k.strip():
+            pistas.append("tiene espacios al principio o al final")
+        if " " in k or "\n" in k:
+            pistas.append("tiene espacios o saltos de linea dentro")
+        if not k.startswith("pat_") and len(k) != 32:
+            pistas.append("ni empieza por pat_ ni tiene 32 caracteres")
+        self._log(f"  Clave recibida: {len(k)} caracteres, "
+                  f"prefijo {k[:4]!r}, sufijo {k[-2:]!r}")
+        for p in pistas:
+            self._log(f"  [ATENCION] {p}")
+        if not pistas:
+            self._log("  La clave tiene buena pinta por formato")
+
         self._log("  Detectando version de la API de Holded")
         for v in orden:
             url = pruebas[v]
