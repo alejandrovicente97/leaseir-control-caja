@@ -1,0 +1,38 @@
+LEASEIR - CONECTAR EL FORECAST A LA API DE HOLDED
+==================================================
+
+Por que hace falta esto
+-----------------------
+El motor de caja corre en el entorno de Anthropic, que tiene la salida a
+api.holded.com bloqueada por lista blanca. La llamada a la API tiene que salir
+de un equipo con internet: el tuyo. A partir de ahi todo es automatico y los
+datos ya NO salen de los Excel.
+
+Pasos (una sola vez)
+--------------------
+1. Crea en esta carpeta un fichero llamado   holded.key
+   con tu token de Holded dentro, en una sola linea, sin comillas.
+   Se saca en:  Holded > Ajustes > Desarrolladores > Credenciales > Anadir token API
+   Permisos de LECTURA sobre: Facturacion, Contactos, Tesoreria y Contabilidad.
+
+   IMPORTANTE: revoca el token que pasaste por el chat y genera uno nuevo.
+
+2. Doble clic en   1_PROBAR_HOLDED.bat
+   Comprueba la conexion y ensena los campos que devuelve Holded.
+   Si algo no cuadra, copia la salida y pegala en el chat.
+
+3. Doble clic en   2_EXTRAER_HOLDED.bat
+   Descarga todo y deja  _data_holded\holded.json  en la carpeta 19. Control Caja.
+
+4. Doble clic en   3_PROGRAMAR_DIARIO.bat
+   Crea la tarea de Windows para que se ejecute solo cada manana a las 07:30.
+
+A partir de ahi
+---------------
+El dashboard se regenera cada dia laborable a las 08:00 leyendo holded.json.
+Los Excel dejan de usarse salvo para el calendario de cobros de Eli, que sigue
+viniendo del Sheet / del Control de Cobros.
+
+Con holded.json disponible se activa ademas el CUADRE DE CAJA: cobros - pagos
+del mes contra la variacion de saldo bancario, que ahora no se puede calcular
+porque los movimientos de tesoreria solo estan en la API.

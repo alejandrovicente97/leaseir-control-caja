@@ -1,0 +1,647 @@
+# -*- coding: utf-8 -*-
+"""
+============================================================================
+ LEASEIR - Generador del dashboard de caja (HTML autocontenido)
+============================================================================
+ Sin dependencias externas: todo el CSS y el JS van embebidos y los graficos
+ son SVG generado en Python. Se abre en cualquier navegador y se puede enviar
+ por correo tal cual.
+============================================================================
+"""
+from __future__ import annotations
+
+import html
+import json
+from datetime import datetime
+
+# ---------------------------------------------------------------------------
+#  Paleta Leaseir
+#  El petrol corporativo (#1f4d5c) es color de CHROMA, no de dato: su croma
+#  (0.083) esta por debajo del suelo de 0.1 y en una barra leeria como gris.
+#  Los datos usan una serie validada cuyo primer slot (#007e9e) es el teal mas
+#  saturado que armoniza con la marca y pasa las seis comprobaciones
+#  (banda de luminosidad, croma, separacion CVD, suelo de vision normal,
+#  contraste). Verificado con validate_palette.js sobre superficie #fbfaf8.
+# ---------------------------------------------------------------------------
+P = {
+    # marca
+    "brand": "#1f4d5c", "brand2": "#2d6479", "brand3": "#3d7d92",
+    # serie categorica validada
+    "s1": "#007e9e", "s2": "#eb6834", "s3": "#1baf7a", "s4": "#eda100",
+    "s5": "#e87ba4", "s7": "#1f4d5c",
+    # estado
+    "good": "#0ca30c", "warn": "#fab219", "serious": "#ec835a", "crit": "#d03b3b",
+    # superficies y tinta
+    "surface": "#ffffff", "plane": "#f4f2ef",
+    "ink": "#141618", "ink2": "#4f585d", "muted": "#8a9196",
+    "grid": "#e6e3df", "axis": "#c5c1bb", "border": "rgba(31,77,92,0.13)",
+    "up": "#006300",
+}
+
+
+def eur(x, dec=0) -> str:
+    if x is None:
+        return "—"
+    s = f"{x:,.{dec}f}".replace(",", " ")
+    return s + " €"
+
+
+def esc(s) -> str:
+    return html.escape(str(s if s is not None else ""))
+
+
+# ---------------------------------------------------------------------------
+#  GRAFICOS SVG
+# ---------------------------------------------------------------------------
+def barras_h(datos, color=P["s1"], ancho=680, alto_barra=26, neg_color=None,
+             fmt=eur, max_abs=None):
+    """
+    Barras horizontales con etiqueta directa (obligatorio: el azul/verde de la
+    paleta va por debajo de 3:1 sobre superficie clara, la regla de relieve
+    exige etiqueta visible).
+    """
+    if not datos:
+        return '<p class="vacio">Sin datos.</p>'
+    etiq_w, val_w = 250, 108
+    plot = ancho - etiq_w - val_w
+    m = max_abs or max((abs(v) for _, v in datos), default=1) or 1
+    alto = len(datos) * alto_barra + 8
+    out = [f'<svg viewBox="0 0 {ancho} {alto}" width="100%" height="{alto}" '
+           f'role="img" class="chart">']
+    for i, (nom, val) in enumerate(datos):
+        y = i * alto_barra + 4
+        w = max(2.0, abs(val) / m * plot)
+        c = (neg_color or P["crit"]) if val < 0 else color
+        nom_c = nom if len(str(nom)) <= 34 else str(nom)[:32] + "…"
+        out.append(
+            f'<text x="{etiq_w - 8}" y="{y + 15}" text-anchor="end" class="lbl">{esc(nom_c)}</text>'
+            f'<rect x="{etiq_w}" y="{y + 3}" width="{w:.1f}" height="{alto_barra - 10}" '
+            f'rx="4" fill="{c}"><title>{esc(nom)}: {fmt(val)}</title></rect>'
+            f'<text x="{etiq_w + w + 7:.1f}" y="{y + 15}" class="val">{fmt(val)}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def waterfall(saldo_ini, pasos, ancho=760, alto=260):
+    """Cascada de caja: saldo inicial, flujos de cada mes, saldo final."""
+    puntos = [("Saldo hoy", saldo_ini, "total")]
+    acum = saldo_ini
+    for nom, val in pasos:
+        puntos.append((nom, val, "flujo"))
+        acum += val
+    puntos.append(("Saldo proyectado", acum, "total"))
+
+    vals, run = [], saldo_ini
+    techos = [saldo_ini]
+    for _, v, t in puntos[1:-1]:
+        techos.append(run); run += v; techos.append(run)
+    techos.append(acum)
+    top = max(max(techos), 0) * 1.12
+    bot = min(min(techos), 0) * 1.12 if min(techos) < 0 else 0
+    rango = (top - bot) or 1
+
+    pad_l, pad_b, pad_t = 78, 44, 16
+    plot_h = alto - pad_b - pad_t
+    plot_w = ancho - pad_l - 16
+    paso = plot_w / len(puntos)
+    bw = min(74, paso * 0.56)
+
+    def Y(v): return pad_t + (top - v) / rango * plot_h
+
+    out = [f'<svg viewBox="0 0 {ancho} {alto}" width="100%" height="{alto}" class="chart">']
+    for f in range(5):
+        v = bot + (top - bot) * f / 4
+        y = Y(v)
+        out.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{ancho-16}" y2="{y:.1f}" '
+                   f'stroke="{P["grid"]}" stroke-width="1"/>'
+                   f'<text x="{pad_l-8}" y="{y+4:.1f}" text-anchor="end" class="ax">'
+                   f'{v/1000:,.0f}k</text>')
+    out.append(f'<line x1="{pad_l}" y1="{Y(0):.1f}" x2="{ancho-16}" y2="{Y(0):.1f}" '
+               f'stroke="{P["axis"]}" stroke-width="1.5"/>')
+
+    run = 0.0
+    for i, (nom, val, tipo) in enumerate(puntos):
+        x = pad_l + i * paso + (paso - bw) / 2
+        if tipo == "total":
+            y0, y1 = Y(max(val, 0)), Y(min(val, 0))
+            c = P["s7"]
+            run = val
+        else:
+            ini, fin = run, run + val
+            y0, y1 = Y(max(ini, fin)), Y(min(ini, fin))
+            c = P["s3"] if val >= 0 else P["s2"]
+            run = fin
+        h = max(3.0, abs(y1 - y0))
+        out.append(f'<rect x="{x:.1f}" y="{y0:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="4" '
+                   f'fill="{c}"><title>{esc(nom)}: {eur(val)}</title></rect>')
+        out.append(f'<text x="{x+bw/2:.1f}" y="{y0-6:.1f}" text-anchor="middle" class="val">'
+                   f'{val/1000:,.0f}k</text>')
+        out.append(f'<text x="{x+bw/2:.1f}" y="{alto-24:.1f}" text-anchor="middle" class="ax">'
+                   f'{esc(nom[:16])}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def barras_agrupadas(meses, series, ancho=760, alto=250):
+    """series = [(nombre, color, [valores por mes])]"""
+    pad_l, pad_b, pad_t = 78, 44, 16
+    plot_h, plot_w = alto - pad_b - pad_t, ancho - pad_l - 16
+    todos = [v for _, _, vs in series for v in vs] or [0]
+    top = max(max(todos), 0) * 1.12
+    bot = min(min(todos), 0) * 1.12 if min(todos) < 0 else 0
+    rango = (top - bot) or 1
+    def Y(v): return pad_t + (top - v) / rango * plot_h
+
+    grupo = plot_w / len(meses)
+    bw = min(52, (grupo * 0.72) / len(series))
+    out = [f'<svg viewBox="0 0 {ancho} {alto}" width="100%" height="{alto}" class="chart">']
+    for f in range(5):
+        v = bot + (top - bot) * f / 4
+        y = Y(v)
+        out.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{ancho-16}" y2="{y:.1f}" '
+                   f'stroke="{P["grid"]}" stroke-width="1"/>'
+                   f'<text x="{pad_l-8}" y="{y+4:.1f}" text-anchor="end" class="ax">{v/1000:,.0f}k</text>')
+    out.append(f'<line x1="{pad_l}" y1="{Y(0):.1f}" x2="{ancho-16}" y2="{Y(0):.1f}" '
+               f'stroke="{P["axis"]}" stroke-width="1.5"/>')
+    for gi, mes in enumerate(meses):
+        base = pad_l + gi * grupo + (grupo - bw * len(series) - 2 * (len(series) - 1)) / 2
+        for si, (nom, col, vs) in enumerate(series):
+            v = vs[gi]
+            x = base + si * (bw + 2)          # separador de 2px entre marcas
+            y0, y1 = Y(max(v, 0)), Y(min(v, 0))
+            h = max(2.0, abs(y1 - y0))
+            out.append(f'<rect x="{x:.1f}" y="{y0:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="4" '
+                       f'fill="{col}"><title>{esc(nom)} · {esc(mes)}: {eur(v)}</title></rect>')
+            out.append(f'<text x="{x+bw/2:.1f}" y="{(y0-6) if v>=0 else (y1+15):.1f}" '
+                       f'text-anchor="middle" class="val">{v/1000:,.0f}k</text>')
+        out.append(f'<text x="{pad_l+gi*grupo+grupo/2:.1f}" y="{alto-22:.1f}" '
+                   f'text-anchor="middle" class="ax">{esc(mes)}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def leyenda(items):
+    return ('<div class="leyenda">' + "".join(
+        f'<span class="li"><i style="background:{c}"></i>{esc(n)}</span>' for n, c in items
+    ) + "</div>")
+
+
+# ---------------------------------------------------------------------------
+#  BLOQUES
+# ---------------------------------------------------------------------------
+def kpi(titulo, valor, nota="", estado=""):
+    cls = f" {estado}" if estado else ""
+    return (f'<div class="kpi{cls}"><div class="k-t">{esc(titulo)}</div>'
+            f'<div class="k-v">{valor}</div>'
+            f'<div class="k-n">{esc(nota)}</div></div>')
+
+
+def tabla(cabeceras, filas, alineacion=None, clases=None):
+    al = alineacion or ["l"] + ["r"] * (len(cabeceras) - 1)
+    th = "".join(f'<th class="{a}">{esc(c)}</th>' for c, a in zip(cabeceras, al))
+    tr = []
+    for i, f in enumerate(filas):
+        cl = f' class="{clases[i]}"' if clases and clases[i] else ""
+        tds = "".join(f'<td class="{a}">{c}</td>' for c, a in zip(f, al))
+        tr.append(f"<tr{cl}>{tds}</tr>")
+    return f'<table><thead><tr>{th}</tr></thead><tbody>{"".join(tr)}</tbody></table>'
+
+
+# ---------------------------------------------------------------------------
+#  DASHBOARD
+# ---------------------------------------------------------------------------
+def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
+    L, meses = fc["lineas"], fc["meses"]
+    m0 = L[meses[0]]
+    etiquetas = [L[m]["etiqueta"] for m in meses]
+
+    # ---- KPIs -------------------------------------------------------------
+    cli = fc["clientes"]
+    prov = fc["proveedores"]
+    pend_cobro = float(cli["pendiente_cobro"].sum()) if not cli.empty else 0.0
+    retraso = float(cli["retraso"].sum()) if not cli.empty else 0.0
+    vencido = float(prov["vencido"].sum()) if not prov.empty else 0.0
+    saldo_fin = L[meses[-1]]["saldo_proyectado"]
+
+    est_fcf = "ok" if m0["fcf"] >= 0 else "mal"
+    est_fin = "ok" if saldo_fin > 200_000 else ("aviso" if saldo_fin > 0 else "mal")
+
+    kpis = "".join([
+        kpi("Posición bancaria hoy", eur(fc["saldo_actual"]),
+            f"+ {eur(fc['polizas_disponible'])} en pólizas"),
+        kpi(f"Unlevered FCF {m0['etiqueta']}", eur(m0["fcf"]),
+            f"Cash in {eur(m0['cash_in'])} · out {eur(m0['cash_out'])}", est_fcf),
+        kpi(f"Saldo proyectado a {etiquetas[-1]}", eur(saldo_fin),
+            "sin tirar de pólizas", est_fin),
+        kpi("Pendiente de cobro exigible", eur(pend_cobro),
+            f"de los cuales {eur(retraso)} en retraso",
+            "aviso" if retraso > 300_000 else ""),
+        kpi("Vencido a proveedores", eur(-vencido),
+            f"{int((prov['vencido'] > 0.01).sum()) if not prov.empty else 0} proveedores",
+            "aviso" if vencido > 200_000 else ""),
+        kpi("Cobertura de tesorería",
+            f'{(fc["saldo_actual"] + fc["polizas_disponible"]) / abs(m0["cash_out"]):.1f}×'
+            if m0["cash_out"] else "—",
+            "saldo + pólizas / pagos del mes"),
+    ])
+
+    # ---- alertas ----------------------------------------------------------
+    if alertas:
+        ico = {"critico": "▲", "aviso": "●"}
+        al_html = "".join(
+            f'<li class="{a["nivel"]}"><span class="ico">{ico.get(a["nivel"], "●")}</span>'
+            f'{esc(a["texto"])}</li>' for a in alertas)
+        alertas_html = f'<ul class="alertas">{al_html}</ul>'
+    else:
+        alertas_html = '<p class="vacio">Sin alertas.</p>'
+
+    # ---- tabla forecast ---------------------------------------------------
+    def fila(et, clave, tipo=""):
+        vals = [L[m][clave] for m in meses]
+        cel = [f'<span class="{"neg" if v < 0 else ""}">{eur(v)}</span>' for v in vals]
+        return [f'<span class="{tipo}">{esc(et)}</span>'] + cel
+
+    filas_fc, clases = [], []
+    for et, k, cl in [
+        ("Cobro de clientes", "cobro_clientes", ""),
+        ("Rentings sin facturar", "rentings_sin_factura", ""),
+        ("Ventas comprometidas sin facturar", "ventas_sin_facturar", ""),
+        ("Ajustes sobre cobros", "ajustes_cobros", ""),
+        ("CASH IN", "cash_in", "b"),
+        ("Pago a proveedores", "pago_proveedores", ""),
+        ("Gastos recurrentes proyectados", "recurrentes_proyectados", ""),
+        ("Salarios y Seguridad Social", "salarios", ""),
+        ("Cuotas S&amp;L y renting bancario", "cuotas_sl", ""),
+        ("Otros pagos fijos", "otros_fijos", ""),
+        ("CASH OUT", "cash_out", "b"),
+        ("UNLEVERED FREE CASH FLOW", "fcf", "b tot"),
+        ("Saldo proyectado (sin pólizas)", "saldo_proyectado", "b"),
+        ("Saldo proyectado (con pólizas)", "saldo_proyectado_con_polizas", ""),
+    ]:
+        filas_fc.append(fila(et, k, "b" if "b" in cl else ""))
+        clases.append("total" if "tot" in cl else ("sub" if "b" in cl else ""))
+
+    tabla_fc = tabla(["Concepto"] + etiquetas, filas_fc, clases=clases)
+
+    # ---- graficos ---------------------------------------------------------
+    wf = waterfall(fc["saldo_actual"], [(L[m]["etiqueta"], L[m]["fcf"]) for m in meses])
+    barras_mes = barras_agrupadas(etiquetas, [
+        ("Cash in", P["s3"], [L[m]["cash_in"] for m in meses]),
+        ("Cash out", P["s2"], [L[m]["cash_out"] for m in meses]),
+        ("FCF", P["s1"], [L[m]["fcf"] for m in meses]),
+    ])
+    lg_mes = leyenda([("Cash in", P["s3"]), ("Cash out", P["s2"]), ("FCF", P["s1"])])
+
+    # ---- cobros -----------------------------------------------------------
+    if not cli.empty:
+        top_c = cli.nlargest(12, "pendiente_cobro")
+        g_cob = barras_h([(r["cliente"], r["pendiente_cobro"]) for _, r in top_c.iterrows()],
+                         color=P["s1"])
+        fil = []
+        for _, r in cli.nlargest(25, "pendiente_cobro").iterrows():
+            ret = r["retraso"]
+            marca = (f'<span class="chip crit">{eur(ret)}</span>' if ret > 50_000
+                     else (f'<span class="chip warn">{eur(ret)}</span>' if ret > 0.01
+                           else '<span class="chip ok">al día</span>'))
+            fil.append([esc(r["cliente"]), eur(r["pendiente_cobro"]), eur(r["cuota_mes"]),
+                        marca] + [eur(r[f"teorico_{m}"]) for m in meses[1:]])
+        t_cob = tabla(["Cliente", "Pendiente exigible", f"Cuota {m0['etiqueta']}", "Retraso"]
+                      + [f"Teórico {e}" for e in etiquetas[1:]], fil)
+    else:
+        g_cob, t_cob = '<p class="vacio">Sin datos.</p>', ""
+
+    # ---- pagos ------------------------------------------------------------
+    if not prov.empty:
+        top_p = prov.nlargest(12, "pendiente_total")
+        g_pag = barras_h([(r["proveedor"], -r["pendiente_total"]) for _, r in top_p.iterrows()],
+                         color=P["s2"], neg_color=P["s2"])
+        fil = []
+        for _, r in prov.nlargest(25, "pendiente_total").iterrows():
+            v = r["vencido"]
+            marca = (f'<span class="chip crit">{eur(-v)}</span>' if v > 20_000
+                     else (f'<span class="chip warn">{eur(-v)}</span>' if v > 0.01
+                           else '<span class="chip ok">al día</span>'))
+            fil.append([esc(r["proveedor"]), eur(-r["pendiente_total"]), marca,
+                        esc(r["tipologia"])] + [eur(-r[f"pago_{m}"]) for m in meses])
+        t_pag = tabla(["Proveedor", "Pendiente", "Vencido", "Tipología"]
+                      + [f"Pago {e}" for e in etiquetas], fil)
+    else:
+        g_pag, t_pag = '<p class="vacio">Sin datos.</p>', ""
+
+    # ---- lo que Holded no sabe -------------------------------------------
+    det = fc["detalle"]
+    f_sal = [[esc(d["concepto"]), eur(d["importe"])] for d in det["salarios"]]
+    f_sal.append(['<b>Total salarios</b>', f'<b>{eur(sum(d["importe"] for d in det["salarios"]))}</b>'])
+    f_sl = [[esc(d["concepto"]), eur(d["importe"])] for d in det["cuotas_sl"]]
+    f_sl.append(['<b>Total cuotas</b>', f'<b>{eur(sum(d["importe"] for d in det["cuotas_sl"]))}</b>'])
+
+    recu = fc["recurrentes"]
+    if not recu.empty:
+        piv = recu.pivot_table(index=["grupo", "proveedor"], columns="mes",
+                               values="proyectado", aggfunc="sum").fillna(0)
+        f_rec = []
+        for (grp, pr), row in piv.iterrows():
+            vals = [eur(row.get(m, 0)) for m in meses]
+            if any(abs(row.get(m, 0)) > 0.01 for m in meses):
+                f_rec.append([esc(pr), esc(grp)] + vals)
+        t_rec = tabla(["Proveedor", "Grupo"] + etiquetas, f_rec) if f_rec else \
+            '<p class="vacio">Todos los recurrentes ya tienen factura en Holded.</p>'
+    else:
+        t_rec = '<p class="vacio">Sin recurrentes configurados.</p>'
+
+    rent = fc["rentings"]
+    if not rent.empty:
+        piv_r = rent.pivot_table(index="cliente", columns="mes", values="importe",
+                                 aggfunc="sum").fillna(0)
+        f_ren = [[esc(c)] + [eur(row.get(m, 0)) for m in meses]
+                 for c, row in piv_r.iterrows()][:20]
+        t_ren = tabla(["Cliente"] + etiquetas, f_ren)
+    else:
+        t_ren = '<p class="vacio">Sin cuotas de renting pendientes de facturar.</p>'
+
+    # ---- cuadre -----------------------------------------------------------
+    if cuadre["variacion_bancaria"] is None:
+        cuadre_html = (
+            f'<div class="nota-cuadre pendiente"><b>Cuadre no disponible todavía.</b> '
+            f'{esc(cuadre["fuente"])}. En cuanto el extractor traiga los movimientos '
+            f'de tesorería de Holded, este bloque compara automáticamente '
+            f'cobros − pagos contra la variación de saldo.</div>'
+            + tabla(["Concepto", cuadre["etiqueta"]], [
+                ["Cobros ejecutados", eur(cuadre["cobros_ejecutados"])],
+                ["Pagos ejecutados", eur(-cuadre["pagos_ejecutados"])],
+                ["<b>Flujo según facturas</b>", f'<b>{eur(cuadre["flujo_por_facturas"])}</b>'],
+                ["Variación de saldo bancario", "<i>pendiente de Holded</i>"],
+                ["Diferencia", "<i>—</i>"],
+            ]))
+    else:
+        ok = cuadre["cuadra"]
+        cuadre_html = (
+            f'<div class="nota-cuadre {"ok" if ok else "mal"}">'
+            f'<b>{"CUADRA" if ok else "NO CUADRA"}</b> — diferencia '
+            f'{eur(cuadre["diferencia"])} sobre una tolerancia de '
+            f'{eur(cuadre["tolerancia"])}. {esc(cuadre["explicacion"])}</div>'
+            + tabla(["Concepto", cuadre["etiqueta"]], [
+                ["Cobros ejecutados", eur(cuadre["cobros_ejecutados"])],
+                ["Pagos ejecutados", eur(-cuadre["pagos_ejecutados"])],
+                ["<b>Flujo según facturas</b>", f'<b>{eur(cuadre["flujo_por_facturas"])}</b>'],
+                ["Variación de saldo bancario", eur(cuadre["variacion_bancaria"])],
+                ["<b>Diferencia</b>", f'<b>{eur(cuadre["diferencia"])}</b>'],
+            ]))
+
+    # ---- bancos -----------------------------------------------------------
+    b = meta.get("bancos")
+    if b is not None and not b.empty:
+        f_b = [[esc(r["cuenta"]),
+                "Póliza" if r["tipo"] == "poliza" else "Cuenta",
+                eur(r["saldo"])] for _, r in b.iterrows()]
+        t_ban = tabla(["Cuenta", "Tipo", "Saldo"], f_b)
+    else:
+        t_ban = '<p class="vacio">Sin cuentas.</p>'
+
+    # ---- avisos de calidad del dato ---------------------------------------
+    dq = meta.get("calidad", [])
+    dq_html = ("<ul class='dq'>" + "".join(f"<li>{d}</li>" for d in dq) + "</ul>") \
+        if dq else '<p class="vacio">Sin incidencias.</p>'
+
+
+    # ---- contraste con el Excel ------------------------------------------
+    ce = meta.get("contraste") or {}
+    if ce.get("activo"):
+        pares = [("Cobro de clientes", m0["cobro_clientes"], ce.get("cobro_clientes")),
+                 ("Rentings sin facturar", m0["rentings_sin_factura"], ce.get("rentings_ajuste")),
+                 ("Cash in", m0["cash_in"], ce.get("cash_in")),
+                 ("Pago a proveedores", m0["pago_proveedores"],
+                  (ce.get("pago_proveedores") or 0) + (ce.get("proveedores_variable") or 0)),
+                 ("Salarios", m0["salarios"], ce.get("salarios")),
+                 ("Cuotas S&L", m0["cuotas_sl"], ce.get("cuotas_sl")),
+                 ("Cash out", m0["cash_out"], ce.get("cash_out")),
+                 ("Unlevered FCF", m0["fcf"], ce.get("fcf"))]
+        f_ce, cl_ce = [], []
+        for nom, mot, exc in pares:
+            if exc is None:
+                continue
+            dif = mot - exc
+            chip = ("ok" if abs(dif) < 5000 else ("warn" if abs(dif) < 100000 else "crit"))
+            f_ce.append([f"<b>{esc(nom)}</b>" if "Cash" in nom or "FCF" in nom else esc(nom),
+                         eur(mot), eur(exc),
+                         f'<span class="chip {chip}">{eur(dif)}</span>'])
+            cl_ce.append("sub" if ("Cash" in nom or "FCF" in nom) else "")
+        t_ce = tabla(["Concepto", "Motor", f"Excel {esc(ce.get('fichero',''))}", "Diferencia"],
+                     f_ce, clases=cl_ce)
+        ad = ce.get("adicionales_manuales") or []
+        if ad:
+            f_ad = [[esc(a["concepto"]), eur(a["importe"])] for a in ad]
+            f_ad.append(["<b>Total a trasladar a config</b>",
+                         f'<b>{eur(sum(a["importe"] for a in ad))}</b>'])
+            t_ad = tabla(["Partida manual del Excel", "Importe"], f_ad)
+        else:
+            t_ad = ""
+        contraste_html = f"""
+<section>
+  <h2>Contraste con tu Excel</h2>
+  <p class="h2n">Puente entre lo que calcula el motor y lo que tenias a mano en
+   {esc(ce.get('fichero',''))}. Las diferencias no son errores: son criterios
+   distintos, y aqui quedan explicitos.</p>
+  {t_ce}
+  <h2 style="font-size:15px;margin-top:22px">Lo que en tu Excel metias a mano</h2>
+  <p class="h2n">El motor no puede adivinar tu criterio comercial. Estas partidas
+   van en <code>config.yaml</code> &rarr; <code>cobros.ajustes_positivos</code>
+   y entonces el forecast las recoge sola.</p>
+  {t_ad}
+</section>"""
+    else:
+        contraste_html = ""
+
+    # ---- HTML -------------------------------------------------------------
+    return f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Leaseir · Control de caja y forecast</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;background:{P['plane']};color:{P['ink']};
+ font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+ -webkit-font-smoothing:antialiased}}
+.wrap{{max-width:1220px;margin:0 auto;padding:0 20px 72px}}
+.marca{{background:{P['brand']};margin:0 -20px 0;padding:22px 20px}}
+.marca-in{{max-width:1220px;margin:0 auto;display:flex;justify-content:space-between;
+ align-items:flex-end;gap:24px;flex-wrap:wrap}}
+.wordmark{{display:block;color:#fff;font-size:27px;font-weight:300;letter-spacing:7px}}
+.claim{{display:block;color:#a9c4ce;font-size:10.5px;letter-spacing:3.1px;
+ text-transform:uppercase;margin-top:3px}}
+.marca-meta{{text-align:right}}
+.doc{{color:#fff;font-size:16px;font-weight:500;letter-spacing:-.1px}}
+.doc2{{color:#a9c4ce;font-size:12px;margin-top:2px}}
+.tira{{background:{P['brand2']};margin:0 -20px 26px;padding:9px 20px;
+ display:flex;gap:26px;flex-wrap:wrap;justify-content:center;
+ font-size:12.5px;color:#cfe0e6}}
+.tira b{{color:#fff;font-weight:600}}
+h1{{font-size:27px;margin:0 0 4px;letter-spacing:-.4px}}
+h2{{font-size:17px;margin:0 0 4px;letter-spacing:-.2px;color:{P['brand']}}}
+.h2n{{color:{P['muted']};font-size:13px;margin:0 0 14px}}
+section{{background:{P['surface']};border:1px solid {P['border']};border-radius:4px;
+ padding:22px 24px;margin-bottom:18px;box-shadow:0 1px 2px rgba(31,77,92,.05)}}
+section>h2:first-child{{padding-bottom:9px;border-bottom:2px solid {P['brand']};
+ display:inline-block;margin-bottom:8px}}
+.kpis{{margin-top:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:12px;margin-bottom:20px}}
+.kpi{{background:{P['surface']};border:1px solid {P['border']};border-radius:4px;
+ padding:15px 16px;border-top:3px solid {P['brand']};box-shadow:0 1px 2px rgba(31,77,92,.05)}}
+.kpi.ok{{border-top-color:{P['good']}}}
+.kpi.aviso{{border-top-color:{P['warn']}}}
+.kpi.mal{{border-top-color:{P['crit']}}}
+.k-t{{font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;color:{P['muted']};
+ font-weight:600;margin-bottom:6px}}
+.k-v{{font-size:23px;font-weight:650;letter-spacing:-.6px;font-variant-numeric:tabular-nums;
+ color:{P['brand']}}}
+.k-n{{font-size:12px;color:{P['ink2']};margin-top:4px}}
+table{{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}}
+th{{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;
+ color:{P['brand']};font-weight:700;padding:8px 10px;
+ border-bottom:1.5px solid {P['brand']};white-space:nowrap}}
+td{{padding:7px 10px;border-bottom:1px solid {P['grid']}}}
+th.r,td.r{{text-align:right}}
+tr.sub td{{background:#f1f4f5;font-weight:600}}
+tr.total td{{background:{P['brand']};color:#fff;font-weight:700}}
+tr.total td .neg{{color:#ffc9c9}}
+tbody tr:hover td{{background:#f7f9fa}}
+tr.sub:hover td,tr.total:hover td{{background:inherit}}
+.b{{font-weight:650}} .neg{{color:{P['crit']}}}
+.chip{{display:inline-block;padding:1px 8px;border-radius:20px;font-size:12px;font-weight:600}}
+.chip.ok{{background:#e6f5e6;color:{P['up']}}}
+.chip.warn{{background:#fdf1d8;color:#8a5d00}}
+.chip.crit{{background:#fbe6e6;color:#a32020}}
+.alertas{{list-style:none;margin:0;padding:0}}
+.alertas li{{padding:9px 12px;border-radius:9px;margin-bottom:7px;font-size:14px;
+ display:flex;gap:9px;align-items:flex-start}}
+.alertas li.critico{{background:#fbe6e6;color:#8f1d1d}}
+.alertas li.aviso{{background:#fdf4e2;color:#7a5200}}
+.ico{{font-size:11px;line-height:20px}}
+.chart{{display:block;margin:6px 0 4px;overflow:visible}}
+.lbl{{font-size:11.5px;fill:{P['ink2']}}}
+.val{{font-size:11.5px;fill:{P['ink']};font-weight:600;font-variant-numeric:tabular-nums}}
+.ax{{font-size:11px;fill:{P['muted']}}}
+.leyenda{{display:flex;gap:16px;flex-wrap:wrap;margin:2px 0 10px}}
+.li{{display:flex;align-items:center;gap:6px;font-size:12.5px;color:{P['ink2']}}}
+.li i{{width:11px;height:11px;border-radius:3px;display:inline-block}}
+.vacio{{color:{P['muted']};font-size:13.5px;font-style:italic;margin:6px 0}}
+.grid2{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}
+@media(max-width:860px){{.grid2{{grid-template-columns:1fr}}}}
+.nota-cuadre{{padding:12px 14px;border-radius:10px;font-size:13.5px;margin-bottom:14px;line-height:1.5}}
+.nota-cuadre.ok{{background:#e6f5e6;color:#0d5c0d}}
+.nota-cuadre.mal{{background:#fbe6e6;color:#8f1d1d}}
+.nota-cuadre.pendiente{{background:#f0f2f5;color:{P['ink2']}}}
+.dq{{margin:0;padding-left:20px;font-size:13.5px;color:{P['ink2']}}}
+.dq li{{margin-bottom:6px}}
+details{{margin-top:12px}}
+summary{{cursor:pointer;font-size:13px;color:{P['ink2']};font-weight:600;padding:6px 0}}
+.pie{{margin:30px -20px -72px;padding:20px;background:{P['brand']};color:#a9c4ce;
+ font-size:11.5px;line-height:1.65;display:flex;justify-content:space-between;
+ gap:24px;flex-wrap:wrap}}
+.pie b{{color:#fff;letter-spacing:1.5px}}
+.pie-r{{max-width:660px;text-align:right}}
+code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
+</style></head>
+<body><div class="wrap">
+
+<header class="marca">
+  <div class="marca-in">
+    <div class="logo">
+      <span class="wordmark">LEASEIR</span>
+      <span class="claim">Aesthetic Intelligence</span>
+    </div>
+    <div class="marca-meta">
+      <div class="doc">Control de caja y forecast de tesorería</div>
+      <div class="doc2">Dirección Financiera · Leaseir Technologies S.L.U.</div>
+    </div>
+  </div>
+</header>
+
+<div class="tira">
+  <span>Mes en curso <b>{esc(m0['etiqueta'])}</b></span>
+  <span>Horizonte <b>{esc(etiquetas[-1])}</b></span>
+  <span>Fuente <b>{esc(meta.get('origen', '—'))}</b></span>
+  <span>Generado <b>{datetime.now():%d/%m/%Y · %H:%M}</b></span>
+</div>
+
+<div class="kpis">{kpis}</div>
+
+<section>
+  <h2>Alertas</h2>
+  <p class="h2n">Lo que hay que mirar hoy.</p>
+  {alertas_html}
+</section>
+
+<section>
+  <h2>Evolución de la caja</h2>
+  <p class="h2n">Saldo de partida, flujo libre de cada mes y saldo al final del horizonte.</p>
+  {wf}
+</section>
+
+<section>
+  <h2>Forecast de caja</h2>
+  <p class="h2n">Cobros y pagos por mes. Los pagos a proveedor arrastran los vencidos
+   al mes en curso; las partidas que no están en Holded (salarios, cuotas de banco,
+   recurrentes) se proyectan aparte.</p>
+  {tabla_fc}
+  <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
+</section>
+
+<section>
+  <h2>Cobros de clientes</h2>
+  <p class="h2n">Pendiente exigible = cuota teórica acumulada del calendario de Eli
+   menos lo realmente cobrado. No es el saldo vivo de la factura.</p>
+  {g_cob}
+  <details open><summary>Detalle por cliente</summary>{t_cob}</details>
+</section>
+
+<section>
+  <h2>Pagos a proveedores</h2>
+  <p class="h2n">Pendiente por proveedor y reparto por mes de vencimiento.</p>
+  {g_pag}
+  <details open><summary>Detalle por proveedor</summary>{t_pag}</details>
+</section>
+
+<section>
+  <h2>Lo que Holded no sabe</h2>
+  <p class="h2n">Partidas que no existen como factura y que sin embargo hay que pagar
+   o cobrar. Es justo la razón por la que el forecast de Holded se queda corto.</p>
+  <div class="grid2">
+    <div><h2 style="font-size:15px">Salarios y Seguridad Social</h2>{tabla(["Concepto", "Mensual"], f_sal)}</div>
+    <div><h2 style="font-size:15px">Cuotas S&amp;L y renting bancario</h2>{tabla(["Operación", "Mensual"], f_sl)}</div>
+  </div>
+  <h2 style="font-size:15px;margin-top:22px">Gastos recurrentes proyectados</h2>
+  <p class="h2n">Solo se proyectan los meses en los que aún no hay factura en Holded,
+   así que nunca se duplica.</p>
+  {t_rec}
+  <h2 style="font-size:15px;margin-top:22px">Cuotas de renting pendientes de facturar</h2>
+  <p class="h2n">Están en el calendario de Eli y todavía no tienen factura emitida.</p>
+  {t_ren}
+</section>
+
+{contraste_html}
+
+<section>
+  <h2>Cuadre de caja</h2>
+  <p class="h2n">Cobros − pagos del mes debe ser igual a la variación del saldo
+   bancario. Si no cuadra, falta un movimiento.</p>
+  {cuadre_html}
+</section>
+
+<section>
+  <h2>Posición bancaria</h2>
+  {t_ban}
+</section>
+
+<section>
+  <h2>Calidad del dato</h2>
+  <p class="h2n">Incidencias detectadas al construir el forecast.</p>
+  {dq_html}
+</section>
+
+<footer class="pie">
+  <div class="pie-l"><b>LEASEIR TECHNOLOGIES S.L.U.</b> · leaseir.com</div>
+  <div class="pie-r">Documento interno de la Dirección Financiera.
+   Generado automáticamente a partir de Holded y del calendario de cobros.
+   No difundir fuera del Comité de Dirección.</div>
+</footer>
+</div></body></html>"""

@@ -1,0 +1,172 @@
+# ============================================================================
+# Leaseir Technologies - Control de Caja y Forecast
+# Parametros de negocio. Editable sin tocar codigo.
+# ============================================================================
+
+empresa: LEASEIR TECHNOLOGIES SLU
+
+# ---------------------------------------------------------------------------
+# 1. PAGOS QUE NO ESTAN EN HOLDED (hay que meterlos a mano)
+# ---------------------------------------------------------------------------
+salarios:
+  # Importes mensuales. Replica la formula del Excel:
+  #   -180000 - 5000 - 45000*1.21 - 22000*1.21 = -266.070
+  nomina_neta:        180000
+  otros_personal:       5000
+  servicios_con_iva:                       # se les aplica 1.21
+    - { concepto: "Externos / autonomos", base: 45000 }
+    - { concepto: "Direccion / consejo",  base: 22000 }
+  iva: 0.21
+
+# Cuotas mensuales de Sale & Leaseback / renting financiero con bancos.
+# No aparecen como factura pendiente en Holded hasta que el banco las emite.
+cuotas_sl:
+  proyectar_si_no_hay_factura: true
+  # Si se deja vacio, el motor las deduce de Holded (Tipologia = "S&L")
+  # tomando la ultima cuota conocida por operacion.
+  operaciones:
+    - { operacion: "Operacion III", proveedor: "BBVA, S.A.",                    importe: 14965.66, dia_mes: 3 }
+    - { operacion: "Operacion D",   proveedor: "BANCO SANTANDER S.A.",          importe:  6111.94, dia_mes: 9 }
+    - { operacion: "Operacion II",  proveedor: "BANCO SANTANDER S.A.",          importe:  5047.29, dia_mes: 23 }
+    - { operacion: "Operacion II",  proveedor: "BANCO SANTANDER S.A.",          importe:  5047.29, dia_mes: 23 }
+    - { operacion: "Operacion II",  proveedor: "BANCO SANTANDER S.A.",          importe:  5047.29, dia_mes: 23 }
+    - { operacion: "Operacion II",  proveedor: "BANCO SANTANDER S.A.",          importe:  5047.29, dia_mes: 23 }
+    - { operacion: "Operacion V",   proveedor: "BANCO SANTANDER S.A.",          importe:  7144.97, dia_mes: 16 }
+    - { operacion: "Operacion V",   proveedor: "BANCO SANTANDER S.A.",          importe:  9215.69, dia_mes: 16 }
+    - { operacion: "Operacion IV",  proveedor: "BANCO DE SABADELL S.A.",        importe: 14919.19, dia_mes: 17 }
+    - { operacion: "Operacion C",   proveedor: "BANCO SANTANDER S.A.",          importe: 27239.57, dia_mes: 13 }
+    - { operacion: "Operacion A",   proveedor: "CSI RENTING DE TECNOLOGIA, SAU", importe: 6551.90, dia_mes: 3 }
+    - { operacion: "Operacion B",   proveedor: "CSI RENTING DE TECNOLOGIA, SAU", importe: 5199.79, dia_mes: 3 }
+    - { operacion: "Operacion VII", proveedor: "BANCO DE SABADELL S.A.",        importe: 20008.62, dia_mes: 4 }
+    - { operacion: "Operacion I",   proveedor: "BANCO SANTANDER S.A.",          importe:  2381.68, dia_mes: 23 }
+
+# Otros pagos fijos mensuales no capturados arriba
+otros_pagos_fijos: 5650
+
+# ---------------------------------------------------------------------------
+# 2. GASTOS RECURRENTES A PROYECTAR CUANDO NO HAY FACTURA EN HOLDED
+# ---------------------------------------------------------------------------
+# Regla: para cada mes de forecast, si el proveedor NO tiene factura en Holded
+# con vencimiento en ese mes, se proyecta el importe base.
+# Si SI la tiene, se usa la factura real (nunca se duplica).
+recurrentes:
+  metodo_base: mediana_meses_activos   # mediana | media | media_movil_3 | fijo
+  ventana_meses: 12
+  proveedores:
+    - { patron: "NOBIS CAPITAL",   etiqueta: "Nobis Capital",       grupo: "Alquileres" }
+    - { patron: "MIRALOMA",        etiqueta: "Miraloma Holdings",   grupo: "Alquileres" }
+    - { patron: "Maria Martire",   etiqueta: "Maria Martire",       grupo: "Servicios" }
+    - { patron: "DHL",             etiqueta: "DHL (todas)",         grupo: "Transporte" }
+    - { patron: "FEDEX",           etiqueta: "FedEx",               grupo: "Transporte" }
+    - { patron: "Transcano",       etiqueta: "Transcano (DHL)",     grupo: "Transporte" }
+    - { patron: "GIJON DIRECTO",   etiqueta: "MRW Gijon Directo",   grupo: "Transporte" }
+    - { patron: "SEUR",            etiqueta: "SEUR",                grupo: "Transporte" }
+    - { patron: "Panarcos",        etiqueta: "Panarcos",            grupo: "Transporte" }
+    - { patron: "ENDESA",          etiqueta: "Endesa",              grupo: "Suministros" }
+    - { patron: "VODAFONE",        etiqueta: "Vodafone",            grupo: "Suministros" }
+    - { patron: "TELEFONICA",      etiqueta: "Telefonica",          grupo: "Suministros" }
+    - { patron: "Google Cloud",    etiqueta: "Google Cloud",        grupo: "Software" }
+    - { patron: "MongoDB",         etiqueta: "MongoDB",             grupo: "Software" }
+    - { patron: "ATLASSIAN",       etiqueta: "Atlassian",           grupo: "Software" }
+    - { patron: "AYVENS",          etiqueta: "Ayvens",              grupo: "Renting vehiculos" }
+    - { patron: "ARVAL",           etiqueta: "Arval",               grupo: "Renting vehiculos" }
+    - { patron: "ATHLON",          etiqueta: "Athlon",              grupo: "Renting vehiculos" }
+    - { patron: "LEASYS",          etiqueta: "Leasys",              grupo: "Renting vehiculos" }
+    - { patron: "URGISA",          etiqueta: "Urgisa",              grupo: "Alquileres" }
+    - { patron: "CINK WORKSPACE",  etiqueta: "Cink Workspace",      grupo: "Alquileres" }
+    - { patron: "BLUE SELF STORAGE", etiqueta: "Blue Self Storage", grupo: "Alquileres" }
+
+# ---------------------------------------------------------------------------
+# 3. COBROS
+# ---------------------------------------------------------------------------
+cobros:
+  # Mes a partir del cual el calendario de Eli tiene cuotas cargadas.
+  # 'auto' lo deduce del propio calendario (hoy: 202501). Las facturas
+  # anteriores quedan fuera del forecast: o estan cobradas o se cedieron.
+  desde_mes: auto
+
+  # Rentings: la cuota existe en el calendario de Eli aunque no haya factura
+  # en Holded. Se proyecta como "Ajustes positivos (Rentings)".
+  proyectar_rentings_sin_factura: true
+
+  # Rentings cedidos al banco (sale & leaseback): la factura entra integra en
+  # caja unos meses despues de emitirse, no cuota a cuota.
+  rentings_financiados:
+    activo: true
+    desfase_meses: 2
+    cuentas_renting:
+      - "Renting"
+
+  # Ventas comprometidas todavia sin facturar (equivale a "Elha (Sin facturar)")
+  sin_facturar:
+    - { concepto: "Elha", unidades: 6, precio: 24000, iva: 0.21 }
+
+  # Ajustes manuales sobre el forecast de cobros del mes en curso
+  ajustes_negativos:
+    - { concepto: "Riesgo cobro cliente A", importe: -54000 }
+    - { concepto: "Riesgo cobro cliente B", importe: -22000 }
+    - { concepto: "Riesgo cobro cliente C", importe:  -8000 }
+    - { concepto: "Riesgo cobro cliente D", importe:  -8000 }
+  ajustes_positivos: []
+
+  # Clientes que se excluyen del forecast (intercompania, concursos, incobrables).
+  # Se siguen calculando y se muestran aparte en el dashboard: fuera del
+  # forecast, pero nunca invisibles.
+  excluir_clientes:
+    - "Leaseir Medical Light, S.L."      # IC, sociedad extinta, no se cobra
+
+# ---------------------------------------------------------------------------
+# 4. CLASIFICACION DE CERTIDUMBRE  (el "Mapping Nacho" 1-6)
+# ---------------------------------------------------------------------------
+certidumbre:
+  cobros:
+    1: "Cobros seguros"      # factura emitida, vencimiento en el mes, sin retraso
+    2: "Cobros posibles"     # sin factura o vencimiento incierto
+    3: "Cobros retrasados"   # vencido y no cobrado
+  pagos:
+    4: "Pagos seguros"       # nominas, cuotas banco, vencimiento en el mes
+    5: "Pagos posibles"      # proyectados / variables
+    6: "Pagos retrasados"    # vencidos y no pagados
+  # Dias desde vencimiento a partir de los cuales se considera "retrasado"
+  dias_retraso: 0
+
+# ---------------------------------------------------------------------------
+# 5. CUADRE DE CAJA
+# ---------------------------------------------------------------------------
+cuadre:
+  tolerancia_eur: 1000        # diferencia aceptable en el check mensual
+  incluir_polizas: false      # el check se hace sobre saldo sin polizas
+
+# ---------------------------------------------------------------------------
+# 6. FORECAST
+# ---------------------------------------------------------------------------
+forecast:
+  meses_adelante: 2           # M0 + M+1 + M+2
+  # Los pagos a proveedor se acumulan por fecha de vencimiento: el forecast del
+  # mes X incluye TODO lo pendiente con vencimiento <= fin de X (arrastra vencidos)
+  arrastrar_vencidos: true
+
+# ---------------------------------------------------------------------------
+# 7. CONTRASTE CON EL EXCEL (para validar el motor en la primera vuelta)
+# ---------------------------------------------------------------------------
+# Cifras del "20260717 - Forecast CashFlow.xlsx", columna H (Total) del mes.
+# Sirven para ver el puente entre lo que calcula el motor y lo que tenias a mano.
+contraste_excel:
+  activo: true
+  fichero: "20260717 - Forecast CashFlow.xlsx"
+  mes: 202607
+  cash_in: 1595725
+  cash_out: -1500057
+  fcf: 95668
+  cobro_clientes: 1371508
+  rentings_ajuste: 166976
+  pago_proveedores: -1007873
+  proveedores_variable: -86536
+  salarios: -266070
+  cuotas_sl: -133928
+  # Partidas que en tu Excel metes a mano y que aqui deben ir a
+  # cobros.ajustes_positivos para que el motor las recoja:
+  adicionales_manuales:
+    - { concepto: "Columna 'Adicional' del mes",        importe: 137758 }
+    - { concepto: "Ajustes manuales dentro de F6",      importe:  54468 }
+    - { concepto: "Ajuste manual dentro de 'Otros'",    importe:  36000 }
