@@ -170,3 +170,12 @@ contraste_excel:
     - { concepto: "Columna 'Adicional' del mes",        importe: 137758 }
     - { concepto: "Ajustes manuales dentro de F6",      importe:  54468 }
     - { concepto: "Ajuste manual dentro de 'Otros'",    importe:  36000 }
+
+# ---------------------------------------------------------------------------
+# 8. PUBLICACION
+# ---------------------------------------------------------------------------
+publicacion:
+  # El boton "Forzar actualizacion" del dashboard abre esta pagina, desde donde
+  # se relanza el workflow a mano sin esperar a las 07:30.
+  url_workflow: "https://github.com/alejandrovicente97/leaseir-control-caja/actions/workflows/caja.yml"
+  zona_horaria: "Europe/Madrid"

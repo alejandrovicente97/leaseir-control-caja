@@ -52,14 +52,49 @@ def _credencial():
     return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
 
 
+def descargar_publico(file_id: str = ID_SHEET_ELI,
+                      destino: Path = Path("calendario_eli.xlsx")) -> Path | None:
+    """
+    Via rapida: si el fichero esta compartido como "cualquiera con el enlace",
+    se baja con una URL normal y corriente. Sin cuenta de servicio, sin Google
+    Cloud, sin secrets. Es el camino por defecto.
+
+    Devuelve None si no esta compartido asi, para que se intente con credencial.
+    """
+    import requests
+    url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+    try:
+        r = requests.get(url, timeout=180, allow_redirects=True)
+    except requests.RequestException as e:
+        print(f"  [aviso] no se pudo bajar el Sheet publico: {e}")
+        return None
+
+    tipo = r.headers.get("Content-Type", "")
+    if r.status_code == 200 and ("spreadsheet" in tipo or "octet-stream" in tipo
+                                 or r.content[:2] == b"PK"):
+        destino = Path(destino)
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_bytes(r.content)
+        print(f"  Calendario de Eli descargado sin credenciales "
+              f"({len(r.content)/1e6:.1f} MB) -> {destino}")
+        return destino
+
+    print(f"  [aviso] el Sheet no es accesible por enlace (HTTP {r.status_code}, {tipo}).")
+    return None
+
+
 def descargar_sheet(file_id: str = ID_SHEET_ELI,
                     destino: Path = Path("calendario_eli.xlsx")) -> Path:
     """
     Descarga el fichero de Eli a disco.
 
-    Sirve para los dos casos: si es un .xlsx subido se baja tal cual
-    (alt=media); si alguien lo convierte a Google Sheets nativo, se exporta.
+    1) Se intenta por enlace publico: cero credenciales.
+    2) Si no, con cuenta de servicio (GOOGLE_SERVICE_ACCOUNT_JSON).
     """
+    ruta = descargar_publico(file_id, destino)
+    if ruta:
+        return ruta
+    print("  Reintentando con cuenta de servicio...")
     import requests
     from google.auth.transport.requests import Request
 

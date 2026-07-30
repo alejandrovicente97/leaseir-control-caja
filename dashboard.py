@@ -12,7 +12,23 @@ from __future__ import annotations
 
 import html
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+    MADRID = ZoneInfo("Europe/Madrid")
+except Exception:                                   # pragma: no cover
+    MADRID = None
+
+
+def ahora_es() -> datetime:
+    """
+    Hora peninsular espanola. Los runners de GitHub van en UTC, asi que sin esto
+    el sello del dashboard saldria dos horas atrasado en verano.
+    """
+    u = datetime.now(timezone.utc)
+    return u.astimezone(MADRID) if MADRID else u
 
 # ---------------------------------------------------------------------------
 #  Paleta Leaseir
@@ -508,6 +524,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                                     vacio="Sin pagos pendientes.")
 
     cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
+    url_workflow = meta.get("url_workflow") or (
+        "https://github.com/alejandrovicente97/leaseir-control-caja"
+        "/actions/workflows/caja.yml")
 
     # ---- contraste con el Excel ------------------------------------------
     ce = meta.get("contraste") or {}
@@ -581,6 +600,11 @@ body{{margin:0;background:{P['plane']};color:{P['ink']};
  display:flex;gap:26px;flex-wrap:wrap;justify-content:center;
  font-size:12.5px;color:#cfe0e6}}
 .tira b{{color:#fff;font-weight:600}}
+.tira i{{font-style:normal;opacity:.65}}
+.btn-refresh{{background:rgba(255,255,255,.14);color:#fff;text-decoration:none;
+ padding:4px 13px;border-radius:4px;font-weight:600;font-size:12.5px;
+ border:1px solid rgba(255,255,255,.28);transition:background .12s;white-space:nowrap}}
+.btn-refresh:hover{{background:rgba(255,255,255,.26)}}
 h1{{font-size:27px;margin:0 0 4px;letter-spacing:-.4px}}
 h2{{font-size:17px;margin:0 0 4px;letter-spacing:-.2px;color:{P['brand']}}}
 .h2n{{color:{P['muted']};font-size:13px;margin:0 0 14px}}
@@ -694,7 +718,10 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   <span>Mes en curso <b>{esc(m0['etiqueta'])}</b></span>
   <span>Horizonte <b>{esc(etiquetas[-1])}</b></span>
   <span>Fuente <b>{esc(meta.get('origen', '—'))}</b></span>
-  <span>Generado <b>{datetime.now():%d/%m/%Y · %H:%M}</b></span>
+  <span>Actualizado <b>{ahora_es():%d/%m/%Y · %H:%M} h</b> <i>(hora peninsular)</i></span>
+  <a class="btn-refresh" href="{url_workflow}" target="_blank" rel="noopener"
+     title="Abre GitHub Actions y lanza el workflow: vuelve a leer Holded y el calendario de Eli">
+     ⟳ Forzar actualización</a>
 </div>
 
 <nav class="tabs">

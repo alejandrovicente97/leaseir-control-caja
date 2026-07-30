@@ -105,7 +105,9 @@ def main() -> None:
             f"cuotas mal cargadas en la hoja de Eli.")
 
     meta = {"origen": datos["origen"], "bancos": datos["bancos"], "calidad": calidad,
-            "contraste": cfg.get("contraste_excel") or {}}
+            "contraste": cfg.get("contraste_excel") or {},
+            "cuadre_proyeccion": m.cuadre_proyeccion(fc),
+            "url_workflow": (cfg.get("publicacion") or {}).get("url_workflow")}
 
     # ---- salida ----------------------------------------------------------
     html = construir(fc, cu, alertas, meta)

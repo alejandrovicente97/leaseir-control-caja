@@ -229,6 +229,19 @@ class MotorCaja:
         df["certidumbre"] = df["vencido"].map(lambda x: 6 if x > 0.01 else 4)
         return df.sort_values("pendiente_total", ascending=False)
 
+    def detalle_pagos(self) -> pd.DataFrame:
+        """Facturas de compra pendientes, una por linea, para el desplegable."""
+        c = self.compras.copy()
+        c = c[c["pendiente"].abs() > 0.01].copy()
+        if c.empty:
+            return c
+        c["vencido"] = c["mes_venc"].map(
+            lambda m: bool(m) and str(m) < self.mes)
+        c["mes_forecast"] = c["mes_venc"].map(
+            lambda m: self.mes if (m and str(m) <= self.mes) else (
+                str(m) if str(m) in self.meses else "posterior"))
+        return c.sort_values(["proveedor", "vencimiento"])
+
     # -----------------------------------------------------------------------
     def salarios_mes(self) -> tuple[float, list]:
         s = self.cfg["salarios"]
@@ -359,11 +372,39 @@ class MotorCaja:
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
             "detalle": {"salarios": sal_det, "cuotas_sl": sl_det},
             "clientes": cli, "rentings": rent, "proveedores": prov, "recurrentes": recu,
+            "detalle_cobros": self.cobros_por_factura(),
+            "detalle_pagos": self.detalle_pagos(),
         }
 
     # =======================================================================
     #  CUADRE DE CAJA
     # =======================================================================
+    def cuadre_proyeccion(self, fc: dict) -> list[dict]:
+        """
+        La comprobacion que pide cualquier controller sobre un forecast:
+            saldo inicial + cobros - pagos == saldo final
+        Se calcula de forma independiente y se compara, en lugar de arrastrar
+        el saldo: si algun mes no cuadrase, seria un error del motor.
+        """
+        filas, saldo = [], fc["saldo_actual"]
+        for m in fc["meses"]:
+            L = fc["lineas"][m]
+            final_esperado = saldo + L["cash_in"] + L["cash_out"]
+            final_motor = L["saldo_proyectado"]
+            dif = final_motor - final_esperado
+            filas.append({
+                "mes": m, "etiqueta": L["etiqueta"],
+                "saldo_inicial": saldo,
+                "cash_in": L["cash_in"],
+                "cash_out": L["cash_out"],
+                "fcf": L["fcf"],
+                "saldo_final": final_motor,
+                "diferencia": dif,
+                "cuadra": abs(dif) < 0.01,
+            })
+            saldo = final_motor
+        return filas
+
     def cuadre(self, mes: str | None = None) -> dict:
         """
         Check del controller:

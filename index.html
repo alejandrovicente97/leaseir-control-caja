@@ -21,6 +21,11 @@ body{margin:0;background:#f4f2ef;color:#141618;
  display:flex;gap:26px;flex-wrap:wrap;justify-content:center;
  font-size:12.5px;color:#cfe0e6}
 .tira b{color:#fff;font-weight:600}
+.tira i{font-style:normal;opacity:.65}
+.btn-refresh{background:rgba(255,255,255,.14);color:#fff;text-decoration:none;
+ padding:4px 13px;border-radius:4px;font-weight:600;font-size:12.5px;
+ border:1px solid rgba(255,255,255,.28);transition:background .12s;white-space:nowrap}
+.btn-refresh:hover{background:rgba(255,255,255,.26)}
 h1{font-size:27px;margin:0 0 4px;letter-spacing:-.4px}
 h2{font-size:17px;margin:0 0 4px;letter-spacing:-.2px;color:#1f4d5c}
 .h2n{color:#8a9196;font-size:13px;margin:0 0 14px}
@@ -134,7 +139,10 @@ code{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}
   <span>Mes en curso <b>Julio 2026</b></span>
   <span>Horizonte <b>Septiembre 2026</b></span>
   <span>Fuente <b>Excel 20260717 - Forecast CashFlow.xlsx</b></span>
-  <span>Generado <b>30/07/2026 · 12:00</b></span>
+  <span>Actualizado <b>30/07/2026 · 14:08 h</b> <i>(hora peninsular)</i></span>
+  <a class="btn-refresh" href="https://github.com/alejandrovicente97/leaseir-control-caja/actions/workflows/caja.yml" target="_blank" rel="noopener"
+     title="Abre GitHub Actions y lanza el workflow: vuelve a leer Holded y el calendario de Eli">
+     ⟳ Forzar actualización</a>
 </div>
 
 <nav class="tabs">
