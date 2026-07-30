@@ -238,6 +238,12 @@ cuadre:
   # considera el de apertura del ejercicio y no un movimiento. Con 3,5 millones
   # en juego -eso valia la apertura de 2026- conviene que sea explicito.
   lineas_apertura: 20
+
+  # Dentro de las cuentas puente, las que son traspasos entre cuentas propias.
+  # No son caja ni hay nada que clasificar: se anulan solas. Se separan de las
+  # que si estan pendientes de aplicar de verdad para no mandar a nadie a
+  # revisar movimientos que ya estan explicados.
+  patrones_traspaso: ["traspaso", "transferencia entre cuentas", "entre bancos"]
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 

@@ -307,8 +307,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             eur(eje.get("fcf", 0)),
             (f"Caja {eur(eje.get('variacion_caja', 0))} · financiación "
              f"{eur(eje.get('financiacion', 0))}"
-             + (f" · sin aplicar {eur(eje.get('suspenso', 0))}"
-                if abs(eje.get("suspenso", 0)) > 0.5 else "")
+             + (f" · por aplicar {eur(eje.get('por_aplicar', 0))}"
+                if abs(eje.get("por_aplicar", 0)) > 0.5 else "")
              if eje.get("fuente") == "libro diario" else
              f"Cobrado {eur(eje.get('cobros', 0))} · pagado {eur(eje.get('pagos', 0))}"),
             est_fcf),
@@ -743,17 +743,23 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         f_pu += [["Financiación incluida en esa variación",
                   f'<span class="{"neg" if eje["financiacion"] < 0 else ""}">'
                   f'{eur(eje["financiacion"])}</span>']]
-        susp = eje.get("suspenso", 0)
-        if abs(susp) > 0.5:
+        tras = eje.get("traspasos", 0)
+        apl = eje.get("por_aplicar", eje.get("suspenso", 0))
+        if abs(tras) > 0.5:
             f_pu.append([
-                "Partidas pendientes de aplicar (cuentas puente) — "
-                "<b>hay que clasificarlas</b>",
-                f'<span class="{"neg" if susp < 0 else ""}">{eur(susp)}</span>'])
+                "Traspasos entre cuentas propias vía cuenta puente "
+                "<i>(no es caja, se anulan solos)</i>",
+                f'<span class="{"neg" if tras < 0 else ""}">{eur(tras)}</span>'])
+        if abs(apl) > 0.5:
+            f_pu.append([
+                "Pendiente de aplicar de verdad — <b>hay que clasificarlo</b>",
+                f'<span class="{"neg" if apl < 0 else ""}">{eur(apl)}</span>'])
         f_pu += [["<b>Unlevered FCF ejecutado</b> = variación − financiación − puente",
                   f'<b>{eur(eje["fcf"])}</b>'],
                  ["Para contrastar: la misma cifra contando solo facturas",
                   eur(eje.get("por_facturas", 0))]]
-        n_sub = 2 if abs(eje.get("suspenso", 0)) > 0.5 else 1
+        n_sub = (1 + (abs(eje.get("traspasos", 0)) > 0.5)
+                 + (abs(eje.get("por_aplicar", 0)) > 0.5))
         cl_pu = [""] * (len(f_pu) - 2 - n_sub) + ["sub"] * n_sub + ["total", ""]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
@@ -764,13 +770,17 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         ds = eje.get("detalle_suspenso") or []
         if ds:
             t_puente += (
-                f'<details open><summary>Los {eur(eje["suspenso"])} sin aplicar, '
+                f'<details open><summary>Las cuentas puente de {etiqueta_m0}, '
                 f'apunte a apunte — {len(ds)} movimiento'
                 f'{"s" if len(ds) != 1 else ""}</summary>'
-                + tabla(["Fecha", "Cuenta", "Nombre", "Concepto en el banco",
+                + tabla(["Fecha", "Qué es", "Cuenta", "Concepto en el banco",
                          "Importe"],
-                        [[esc(x["fecha"]), f'<code>{esc(x["cuenta"])}</code>',
-                          esc(x["nombre"]), esc(x["concepto"]),
+                        [[esc(x["fecha"]),
+                          ('<span class="chip ok">traspaso</span>'
+                           if x.get("traspaso") else
+                           '<span class="chip warn">por aplicar</span>'),
+                          f'<code>{esc(x["cuenta"])}</code> {esc(x["nombre"])}',
+                          esc(x["concepto"]),
                           f'<span class="{"neg" if x["importe"] < 0 else ""}">'
                           f'{eur(x["importe"])}</span>'] for x in ds],
                         alineacion=["", "", "", "", "r"])

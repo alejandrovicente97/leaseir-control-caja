@@ -554,12 +554,26 @@ class MotorCaja:
         # llevado a su cuenta. Sumarlo al unlevered lo mueve 145.000 euros sin
         # que nadie sepa de que. Se saca y se dice cuanto queda por clasificar.
         c["es_susp"] = c["cta_contra"].map(lambda x: str(x).startswith(pref_susp))
+        # Dentro del suspenso hay dos cosas muy distintas. La mayor parte de los
+        # 131.119 de julio son "Traspasos entre bancos LT": mover dinero de una
+        # cuenta propia a otra pasando por una cuenta puente en vez de banco
+        # contra banco. Eso no es caja ni hay nada que clasificar, se anula
+        # solo. Lo demas si esta pendiente de aplicar de verdad, y eso es
+        # trabajo. Llamar a las dos cosas igual manda a alguien a revisar
+        # 131.000 euros de los que 145.000 no necesitan revision.
+        pat_traspaso = tuple(norm(p).lower() for p in
+                             ((self.cfg.get("cuadre") or {}).get("patrones_traspaso")
+                              or ["traspaso", "transferencia entre cuentas"]))
+        c["es_traspaso"] = c["es_susp"] & c["nom_contra"].map(
+            lambda n: any(p in norm(str(n)).lower() for p in pat_traspaso))
         c["es_fin"] = c["cta_contra"].map(
             lambda x: str(x).startswith(pref_fin)) & ~c["es_susp"]
 
         variacion = float(c["importe"].sum())
         financiacion = float(c[c["es_fin"]]["importe"].sum())
         suspenso = float(c[c["es_susp"]]["importe"].sum())
+        traspasos = float(c[c["es_traspaso"]]["importe"].sum())
+        por_aplicar = suspenso - traspasos
         # El detalle va por CUENTA y no solo por grupo: donde se pone la
         # frontera de "financiacion" mueve la cifra entera, y eso hay que
         # poder verlo cuenta a cuenta para discutirlo, no aceptarlo.
@@ -581,6 +595,7 @@ class MotorCaja:
         sp = c[c["es_susp"]].copy()
         sp["nat"] = sp["asiento"].map(nat)
         det_susp = [{"fecha": str(r["fecha"]), "cuenta": r["cta_contra"],
+                     "traspaso": bool(r["es_traspaso"]),
                      "nombre": r.get("nom_contra") or r["nat"],
                      "concepto": r["concepto"], "banco": r.get("cuenta_nombre", ""),
                      "importe": float(r["importe"])}
@@ -590,6 +605,8 @@ class MotorCaja:
             "variacion_caja": variacion,
             "financiacion": financiacion,
             "suspenso": suspenso,
+            "traspasos": traspasos,
+            "por_aplicar": por_aplicar,
             "detalle_suspenso": det_susp,
             "unlevered": variacion - financiacion - suspenso,
             "detalle_financiacion": [
@@ -784,6 +801,8 @@ class MotorCaja:
             eje["variacion_caja"] = ul["variacion_caja"]
             eje["financiacion"] = ul["financiacion"]
             eje["suspenso"] = ul["suspenso"]
+            eje["traspasos"] = ul["traspasos"]
+            eje["por_aplicar"] = ul["por_aplicar"]
             eje["detalle_suspenso"] = ul["detalle_suspenso"]
             eje["detalle_financiacion"] = ul["detalle_financiacion"]
             eje["fuera_perimetro"] = ul["fuera_perimetro"]
