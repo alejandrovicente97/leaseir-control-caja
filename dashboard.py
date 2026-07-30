@@ -333,7 +333,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         cel = [f'<span class="{"neg" if v < 0 else ""}">{eur(v)}</span>' for v in vals]
         return [f'<span class="{tipo}">{esc(et)}</span>'] + cel
 
-    filas_fc, clases = [], []
+    filas_fc, clases, claves_fc = [], [], []
     for et, k, cl in [
         ("Cobro de clientes", "cobro_clientes", ""),
         ("Rentings sin facturar", "rentings_sin_factura", ""),
@@ -355,8 +355,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     ]:
         filas_fc.append(fila(et, k, "b" if "b" in cl else ""))
         clases.append("total" if "tot" in cl else ("sub" if "b" in cl else ""))
-
-    tabla_fc = tabla(["Concepto"] + etiquetas, filas_fc, clases=clases)
+        claves_fc.append(k)
 
     # ---- graficos ---------------------------------------------------------
     wf = waterfall(fc["saldo_actual"], [(L[m]["etiqueta"], L[m]["fcf"]) for m in meses])
@@ -634,34 +633,32 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         n = f"<b>{esc(nombre)}</b>" if negrita else esc(nombre)
         return [n] + cel
 
+    # El desglose ya no es una seccion aparte con sus parrafos: cuelga de la
+    # propia linea del cuadro. Alejandro lo dijo claro: los totales se ven
+    # siempre y el detalle se despliega si se quiere. Una seccion que repite
+    # los mismos numeros mas abajo, con una explicacion encima de cada bloque,
+    # es paja entre el dato y quien lo lee.
     def _desglose(titulo, filas, nota=""):
         if not filas:
             return ""
-        tot = [sum(f[1][i] for f in filas) for i in range(len(meses))]
         cuerpo = [_fila_meses(n, v) for n, v in filas]
-        cuerpo.append(_fila_meses("Total", tot, True))
-        cl = [""] * (len(cuerpo) - 1) + ["sub"]
-        return (f'<details><summary>{esc(titulo)}</summary>'
-                + (f'<p class="h2n">{esc(nota)}</p>' if nota else "")
-                + tabla(["Concepto"] + etiquetas, cuerpo,
-                        alineacion=[""] + ["r"] * len(meses), clases=cl)
-                + '</details>')
+        return tabla(["Detalle"] + etiquetas, cuerpo,
+                     alineacion=[""] + ["r"] * len(meses))
 
     des = []
+    detalles = {}
 
     if not cli.empty:
         top = cli.reindex(cli[[f"teorico_{m}" for m in meses]].abs().sum(axis=1)
                           .sort_values(ascending=False).index).head(25)
-        des.append(_desglose(
-            f"Cobro de clientes — {len(cli)} cliente{'s' if len(cli) != 1 else ''}, se listan los 25 mayores",
-            [(r["cliente"], [float(r[f"teorico_{m}"]) for m in meses])
-             for _, r in top.iterrows()],
-            "El resto está en la pestaña de Cobros, factura a factura."))
+        detalles["cobro_clientes"] = _desglose(
+            "", [(r["cliente"], [float(r[f"teorico_{m}"]) for m in meses])
+                 for _, r in top.iterrows()])
 
     rent = fc.get("rentings")
     if rent is not None and not rent.empty:
-        for tipo, etiq in [("renting", "Rentings sin facturar"),
-                           ("fusion", "Ventas financiadas desde LML (fusión)")]:
+        for tipo, clave in [("renting", "rentings_sin_factura"),
+                            ("fusion", "ventas_fusion_lml")]:
             g = rent[rent["tipo"] == tipo] if "tipo" in rent.columns else rent
             if g.empty:
                 continue
@@ -670,36 +667,29 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                 porcli.setdefault(r["cliente"], [0.0] * len(meses))
                 if r["mes"] in meses:
                     porcli[r["cliente"]][meses.index(r["mes"])] += float(r["importe"])
-            des.append(_desglose(f"{etiq} — por cliente",
-                                 sorted(porcli.items(), key=lambda x: -sum(x[1]))))
+            detalles[clave] = _desglose(
+                "", sorted(porcli.items(), key=lambda x: -sum(x[1])))
 
     sf = (fc.get("detalle") or {}).get("sin_facturar") or []
     if sf:
-        des.append(_desglose(
-            "Ventas comprometidas sin facturar",
-            [(f'{x["concepto"]} · {x["unidades"]} x {eur(x["precio"])} '
-              f'+ {x["iva"]:.0%} IVA',
-              [x["unidades"] * x["precio"] * (1 + x["iva"])] + [0.0] * (len(meses) - 1))
-             for x in sf],
-            "Solo cuentan en el mes en curso: es un compromiso, no un calendario."))
+        detalles["ventas_sin_facturar"] = _desglose(
+            "", [(f'{x["concepto"]} · {x["unidades"]} x {eur(x["precio"])} '
+                  f'+ {x["iva"]:.0%} IVA',
+                  [x["unidades"] * x["precio"] * (1 + x["iva"])]
+                  + [0.0] * (len(meses) - 1)) for x in sf])
 
     aj = (fc.get("detalle") or {}).get("ajustes") or []
     if aj:
-        des.append(_desglose(
-            "Ajustes sobre cobros",
-            [(x["concepto"], [float(x["importe"])] + [0.0] * (len(meses) - 1))
-             for x in aj],
-            "Criterio manual de config.yaml, no sale de Holded."))
+        detalles["ajustes_cobros"] = _desglose(
+            "", [(x["concepto"], [float(x["importe"])] + [0.0] * (len(meses) - 1))
+                 for x in aj])
 
     if not prov.empty:
         topp = prov.reindex(prov[[f"pago_{m}" for m in meses]].abs().sum(axis=1)
                             .sort_values(ascending=False).index).head(25)
-        des.append(_desglose(
-            f"Pago a proveedores — {len(prov)} proveedor{'es' if len(prov) != 1 else ''}, se listan los 25 mayores",
-            [(r["proveedor"], [-abs(float(r[f"pago_{m}"])) for m in meses])
-             for _, r in topp.iterrows()],
-            "El mes en curso arrastra todo lo vencido. El resto está en la "
-            "pestaña de Pagos."))
+        detalles["pago_proveedores"] = _desglose(
+            "", [(r["proveedor"], [-abs(float(r[f"pago_{m}"])) for m in meses])
+                 for _, r in topp.iterrows()])
 
     recu = fc.get("recurrentes")
     if recu is not None and not recu.empty:
@@ -709,17 +699,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             porprov.setdefault(r[col], [0.0] * len(meses))
             if r["mes"] in meses:
                 porprov[r[col]][meses.index(r["mes"])] += float(r["proyectado"])
-        des.append(_desglose(
-            "Gastos recurrentes proyectados — por proveedor",
-            sorted(porprov.items(), key=lambda x: sum(x[1])),
-            "Solo se proyecta el mes que NO tiene factura en Holded: nunca se "
-            "duplica con una factura real."))
+        detalles["recurrentes_proyectados"] = _desglose(
+            "", sorted(porprov.items(), key=lambda x: sum(x[1])))
 
     det = fc.get("detalle") or {}
     pag_fij = (det.get("fijos_pagados") or {})
-    for clave, titulo in [("salarios", "Salarios y Seguridad Social"),
-                          ("cuotas_sl", "Cuotas S&L y renting bancario"),
-                          ("otros_fijos", "Otros pagos fijos")]:
+    for clave in ("salarios", "cuotas_sl", "otros_fijos"):
         d0 = det.get(clave) or []
         if not d0:
             continue
@@ -728,14 +713,33 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         if hecho:
             filas.append((f"Ya pagado en {m0['etiqueta']}",
                           [hecho] + [0.0] * (len(meses) - 1)))
-        des.append(_desglose(
-            f"{titulo} — composición mensual", filas,
-            "No están en Holded: salen de config.yaml. En el mes en curso se "
-            "descuenta lo ya pagado según el extracto." if hecho else
-            "No están en Holded: salen de config.yaml."))
+        detalles[clave] = _desglose("", filas)
 
-    t_desglose = ("".join(des) if des else
-                  '<p class="vacio">Sin detalle disponible.</p>')
+    # El cuadro se monta a mano en vez de con tabla() porque cada linea que
+    # tiene desglose lleva colgada una fila oculta con su detalle. Asi los
+    # totales se ven siempre y el detalle se abre solo si se pide, en el mismo
+    # sitio donde esta el numero y no en otra seccion mas abajo.
+    cab = "".join(f'<th class="{"" if i == 0 else "r"}">{esc(h)}</th>'
+                  for i, h in enumerate(["Concepto"] + etiquetas))
+    cuerpo = []
+    for i, (f, cl, k) in enumerate(zip(filas_fc, clases, claves_fc)):
+        det_html = detalles.get(k)
+        marca = ('<span class="abre">▸</span>' if det_html else
+                 '<span class="abre vacia"></span>')
+        celdas = (f'<td>{marca}{f[0]}</td>'
+                  + "".join(f'<td class="r">{x}</td>' for x in f[1:]))
+        cls = " ".join(x for x in (cl, "desplegable" if det_html else "") if x)
+        attr = f' class="{cls}"' if cls else ""
+        if det_html:
+            attr += f' data-det="fcd{i}"'
+
+        cuerpo.append(f"<tr{attr}>{celdas}</tr>")
+        if det_html:
+            cuerpo.append(
+                f'<tr class="fc-det" id="fcd{i}" hidden>'
+                f'<td colspan="{len(etiquetas) + 1}">{det_html}</td></tr>')
+    tabla_fc = (f'<table class="fc"><thead><tr>{cab}</tr></thead>'
+                f'<tbody>{"".join(cuerpo)}</tbody></table>')
 
     # ---- previsiones manuales ---------------------------------------------
     # Una cifra corregida a mano que no se sabe corregida es peor que la
@@ -1158,6 +1162,27 @@ details.terc[open]>summary{{background:#f1f4f5;font-weight:600}}
 .t-body td{{padding:4px 8px}}
 .t-body th{{padding:5px 8px}}
 .rojo{{color:{P['crit']}}}
+table.fc{{width:100%;border-collapse:collapse;font-size:13.5px;
+ font-variant-numeric:tabular-nums}}
+table.fc th{{text-align:left;font-size:10.5px;text-transform:uppercase;
+ letter-spacing:.5px;color:{P['brand']};font-weight:700;padding:8px 10px;
+ border-bottom:1.5px solid {P['brand']};white-space:nowrap}}
+table.fc th.r,table.fc td.r{{text-align:right}}
+table.fc td{{padding:7px 10px;border-bottom:1px solid {P['grid']}}}
+table.fc tr.sub td{{background:#f1f4f5;font-weight:600}}
+table.fc tr.total td{{background:{P['brand']};color:#fff;font-weight:700}}
+table.fc tr.total td .neg{{color:#ffc9c9}}
+tr.desplegable{{cursor:pointer}}
+tr.desplegable:hover td{{background:#f7f9fa}}
+tr.desplegable.total:hover td{{background:{P['brand']}}}
+.abre{{display:inline-block;width:14px;color:{P['muted']};font-size:10px;
+ transition:transform .12s}}
+.abre.vacia{{color:transparent}}
+tr.abierta .abre{{transform:rotate(90deg)}}
+tr.fc-det>td{{padding:0 10px 12px 24px;background:#fbfcfc}}
+tr.fc-det table{{font-size:11.5px;margin-top:2px}}
+tr.fc-det td{{padding:4px 8px}}
+tr.fc-det th{{padding:5px 8px;font-size:9.5px}}
 .pie{{margin:30px -20px -72px;padding:20px;background:{P['brand']};color:#a9c4ce;
  font-size:11.5px;line-height:1.65;display:flex;justify-content:space-between;
  gap:24px;flex-wrap:wrap}}
@@ -1210,9 +1235,8 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 
   <section>
     <h2>Forecast de caja</h2>
-    <p class="h2n">Cobros y pagos por mes. Los pagos a proveedor arrastran los vencidos
-     al mes en curso; las partidas que no están en Holded (salarios, cuotas de banco,
-     recurrentes) se proyectan aparte.</p>
+    <p class="h2n">Las líneas con ▸ se abren y enseñan de qué se componen. Los pagos
+     a proveedor arrastran los vencidos al mes en curso.</p>
     {tabla_fc}
     <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
   </section>
@@ -1223,13 +1247,6 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
      no sabe que un cliente no va a pagar este mes; tú sí. Cada corrección se
      ve con lo que decía el motor y cuánto mueve el forecast.</p>
     {t_prev}
-  </section>
-
-  <section>
-    <h2>De qué se compone cada línea</h2>
-    <p class="h2n">Los mismos importes del cuadro de arriba, abiertos. Cada
-     bloque suma exactamente la línea que le corresponde.</p>
-    {t_desglose}
   </section>
 
   <section>
@@ -1415,6 +1432,17 @@ document.querySelectorAll('.tab').forEach(function (b) {{
     b.classList.add('activa');
     document.getElementById(b.dataset.p).classList.add('visible');
     window.scrollTo({{ top: 0, behavior: 'smooth' }});
+  }});
+}});
+
+// Cada linea del cuadro con desglose abre su detalle justo debajo, en el
+// mismo sitio donde esta el numero.
+document.querySelectorAll('tr.desplegable').forEach(function (tr) {{
+  tr.addEventListener('click', function () {{
+    var d = document.getElementById(tr.dataset.det);
+    if (!d) return;
+    d.hidden = !d.hidden;
+    tr.classList.toggle('abierta', !d.hidden);
   }});
 }});
 
