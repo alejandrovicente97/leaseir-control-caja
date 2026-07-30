@@ -52,13 +52,17 @@ DESTINO_DEFECTO = Path(os.environ.get(
 # apostar por uno. El cliente recuerda el que responde.
 RECURSOS_V2 = {
     "facturas_venta":  (["invoices", "sales/invoices"], True),
-    "abonos_venta":    (["credit-notes", "sales/credit-notes", "sales-refunds",
-                         "salesrefunds", "rectificative-invoices"], False),
+    # /credit-notes confirmado en la referencia: "Listado de facturas
+    # rectificativas (abonos): notas de credito", scope sales:invoices.read
+    "abonos_venta":    (["credit-notes"], False),
     "recibos_venta":   (["sales-receipts", "salesreceipts", "receipts"], False),
-    "facturas_compra": (["purchases", "purchase-invoices", "expenses"], True),
-    "abonos_compra":   (["purchases-refunds", "purchase-refunds", "refunds",
-                         "purchase-credit-notes", "purchases/credit-notes",
-                         "expenses-refunds"], False),
+    "facturas_compra": (["purchases"], True),
+    # No se pide abonos_compra: la v2 NO publica un listado de reembolsos de
+    # compra (en la referencia solo hay "Crear una compra rectificativa" y un
+    # webhook). Las rectificativas de compra vienen dentro de /purchases con
+    # importe negativo, que es justo lo que hace que algun proveedor salga con
+    # pendiente positivo. Probar seis rutas inexistentes solo generaba seis 404
+    # y un aviso de "bloque vacio" que parecia un fallo y no lo era.
     "contactos":       (["contacts"], False),
     "pagos":           (["payments"], False),
     "libro_diario":    (["accounting/entries", "accounting/journal-entries",
@@ -76,8 +80,9 @@ RECURSOS_V1 = {
 }
 # La referencia de Holded titula esto "Listado de cuentas bancarias", sin dar
 # el path. Se prueban los nombres razonables y el cliente recuerda el que va.
-TESORERIA_V2 = ["bank-accounts", "treasuries", "treasury", "banks",
-                "bank_accounts", "treasury/accounts", "accounts"]
+# treasury/accounts confirmado en la referencia y en el run #9 (36 cuentas).
+# Va primero para no gastar cuatro 404 antes de acertar.
+TESORERIA_V2 = ["treasury/accounts", "bank-accounts", "treasuries", "banks"]
 TESORERIA_V1 = [f"{BASE_V1}/treasury"]
 
 
@@ -120,15 +125,13 @@ def extraer(cli: Holded, desde: date, hasta: date) -> dict:
             # Los movimientos cuelgan de la misma coleccion que ha respondido
             # para las cuentas: si las cuentas salieron por bank-accounts, los
             # movimientos estan en bank-accounts/{id}/..., no en treasuries/{id}.
-            raiz = cli.rutas.get("cuentas_tesoreria", "treasuries")
-            cands = []
-            for base_r in dict.fromkeys([raiz, "treasuries", "bank-accounts"]):
-                cands += [f"{base_r}/{cid}/movements",
-                          f"{base_r}/{cid}/transactions",
-                          f"{base_r}/{cid}/bank-movements",
-                          f"{base_r}/{cid}/cash-movements"]
-            cands += [f"treasury-movements?account_id={cid}",
-                      f"bank-movements?bank_account_id={cid}"]
+            # "Listado de movimientos de una cuenta bancaria" =
+            #   /treasury/accounts/{id}/bank-movements   (confirmado, 10.269 movs)
+            # cash-movements es la otra mitad: los movimientos de caja.
+            raiz = cli.rutas.get("cuentas_tesoreria", "treasury/accounts")
+            cands = [f"{raiz}/{cid}/bank-movements",
+                     f"{raiz}/{cid}/movements",
+                     f"treasury/accounts/{cid}/bank-movements"]
         else:
             cands = [f"{BASE_V1}/treasury/{cid}/movements"]
         lote = cli.listar(f"movs::{cid}", cands, **ventana)
@@ -152,6 +155,8 @@ def main() -> None:
     ap.add_argument("--desde", default=None)
     ap.add_argument("--hasta", default=None)
     ap.add_argument("--destino", default=None)
+    ap.add_argument("--diagnostico", default=None,
+                    help="ruta donde dejar el esquema y los conteos (sin datos)")
     ap.add_argument("--probar", action="store_true")
     args = ap.parse_args()
 
@@ -191,7 +196,18 @@ def main() -> None:
                    for k, v in datos.items()
                    if isinstance(v, list) and v and isinstance(v[0], dict)},
         "conteos": conteos, "avisos": datos.get("_avisos", []),
+        "truncados": cli.truncados,
     }
+
+    # Diagnostico separado y pequeno: solo nombres de campo, rutas y conteos,
+    # cero datos de negocio. Se versiona en el repo para no tener que leer el
+    # log de Actions, que se pagina y esconde justo las lineas que importan.
+    diag = Path(args.diagnostico) if args.diagnostico else None
+    if diag:
+        diag.parent.mkdir(parents=True, exist_ok=True)
+        with open(diag, "w", encoding="utf-8") as f:
+            json.dump(datos["_meta"], f, ensure_ascii=False, indent=1, default=str)
+        print(f"  Diagnostico en {diag}")
 
     destino = Path(args.destino) if args.destino else DESTINO_DEFECTO
     destino.mkdir(parents=True, exist_ok=True)

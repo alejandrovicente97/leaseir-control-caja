@@ -90,7 +90,25 @@ def main() -> None:
             f"cargadas darian falsos anticipos.")
     excl = cfg["cobros"].get("excluir_clientes") or []
     if excl:
-        calidad.append("Excluidos del forecast por configuracion: " + ", ".join(excl) + ".")
+        calidad.append("Clientes excluidos del forecast por configuracion: "
+                       + ", ".join(excl) + ".")
+
+    # Lo que se aparta del lado de pagos se dice con su importe. Un criterio que
+    # mueve 4,4 millones no puede vivir escondido en un fichero de configuracion.
+    exc_p = cfg.get("pagos", {}).get("excluir_proveedores") or []
+    if exc_p:
+        ce = getattr(m, "compras_excluidas", None)
+        imp = (ce["pendiente"].sum()
+               if ce is not None and not ce.empty and "pendiente" in ce.columns else 0.0)
+        n = 0 if ce is None else len(ce)
+        # el separador de miles se cambia solo en el importe: hacerlo sobre la
+        # frase entera se comia las comas de "Leaseir Medical Light, S.L."
+        cifra = f"{abs(imp):,.0f}".replace(",", " ")
+        calidad.append(
+            f"Proveedores excluidos por intercompania: {', '.join(exc_p)} "
+            f"({n} factura{'s' if n != 1 else ''}, {cifra} EUR pendientes). "
+            f"Es saldo entre sociedades del grupo, no salida de caja: fuera "
+            f"del forecast, pero contabilizado aqui.")
     v = m.cobros_por_factura()
     if not v.empty and "en_calendario" in v.columns:
         sin_cal = int((~v["en_calendario"]).sum())

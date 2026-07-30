@@ -60,6 +60,7 @@ class Holded:
         self.verboso = verboso
         self.bitacora: list[dict] = []
         self.rutas: dict[str, str] = {}      # recurso -> ruta que funciona
+        self.truncados: dict[str, int] = {}  # url -> registros, si parece cortada
 
     # -----------------------------------------------------------------------
     def _log(self, t: str) -> None:
@@ -224,11 +225,15 @@ class Holded:
             vueltas += 1
             if vueltas == 1 or vueltas % 10 == 0:
                 self._log(f"    pagina {vueltas:>3}  total {len(salida)}")
-            if not cursor or not d.get("has_more", bool(cursor)) or not items:
-                # Cortar justo en un multiplo exacto del limite sin cursor es la
-                # firma de una descarga truncada, no de un recurso que se acaba.
-                # Se avisa con las claves de la respuesta para poder arreglarlo.
+            # La documentacion de Holded pagina con  do { ... } while (cursor).
+            # No mira has_more para seguir. Se hace igual: mientras haya cursor
+            # y la pagina traiga algo, se sigue. Cortar por has_more cuando aun
+            # hay cursor fue lo que dejo los abonos de venta en 100 justos.
+            if not cursor or not items:
                 if salida and len(salida) % LIMITE == 0:
+                    # Acabar en un multiplo exacto del limite sin cursor es la
+                    # firma de una descarga truncada, no de un recurso agotado.
+                    self.truncados[url] = len(salida)
                     self._log(f"    [SOSPECHA] corta en {len(salida)} (multiplo de "
                               f"{LIMITE}) sin cursor. Claves de la respuesta: "
                               f"{sorted(d.keys()) if isinstance(d, dict) else type(d)}")

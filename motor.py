@@ -62,6 +62,20 @@ class MotorCaja:
         self.compras = datos["compras"].copy()
         self.avisos: list[str] = []
 
+        # Intercompania del lado de PAGOS. Leaseir Medical Light aparece en
+        # Holded como proveedor con 4,45 millones pendientes en 93 facturas:
+        # el 96% de todo el vencido. No es caja, es saldo entre sociedades del
+        # grupo, y metido en el forecast convertia un julio de +186 mil en uno
+        # de -4,27 millones. Ya se excluia del lado de cobros; hacerlo solo en
+        # un lado era lo que descuadraba.
+        # Se aparta, no se borra: el importe se publica en calidad del dato.
+        self.compras_excluidas = pd.DataFrame()
+        fuera = {norm(p) for p in (cfg.get("pagos") or {}).get("excluir_proveedores") or []}
+        if fuera and not self.compras.empty and "proveedor" in self.compras.columns:
+            marca = self.compras["proveedor"].map(norm).isin(fuera)
+            self.compras_excluidas = self.compras[marca].copy()
+            self.compras = self.compras[~marca].copy()
+
     # =======================================================================
     #  COBROS
     # =======================================================================

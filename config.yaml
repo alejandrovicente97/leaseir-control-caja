@@ -116,6 +116,22 @@ cobros:
     - "Leaseir Medical Light, S.L."      # IC, sociedad extinta, no se cobra
 
 # ---------------------------------------------------------------------------
+# 3.bis PAGOS QUE NO SON CAJA
+# ---------------------------------------------------------------------------
+# La misma sociedad aparece en Holded como cliente Y como proveedor. Excluirla
+# solo del lado de cobros dejaba 4,45 millones de saldo intercompania en el
+# forecast de pagos: el 96% de todo el vencido a proveedores, y un julio de
+# -4,27 millones que no tenia nada que ver con la caja real.
+# Lo excluido no se esconde: sale su importe en "calidad del dato".
+#
+# Solo va aqui la intercompania de verdad. Cuentas como "LEASEIR - FEDEX" o
+# "LEASEIR - ALTAIR" llevan Leaseir en el nombre pero son el transportista o
+# el proveedor real facturando a Leaseir: eso SI es caja y se queda dentro.
+pagos:
+  excluir_proveedores:
+    - "Leaseir Medical Light, S.L."      # IC, no sale dinero de la caja
+
+# ---------------------------------------------------------------------------
 # 4. CLASIFICACION DE CERTIDUMBRE  (el "Mapping Nacho" 1-6)
 # ---------------------------------------------------------------------------
 certidumbre:
