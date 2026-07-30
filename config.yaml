@@ -244,6 +244,17 @@ cuadre:
   # que si estan pendientes de aplicar de verdad para no mandar a nadie a
   # revisar movimientos que ya estan explicados.
   patrones_traspaso: ["traspaso", "transferencia entre cuentas", "entre bancos"]
+
+  # Entidades cuyas cuotas son financiacion aunque esten dadas de alta como
+  # proveedor. Las de cuotas_sl.operaciones entran solas; aqui van las demas.
+  # En julio son 80.248 euros a Banco Santander en la cuenta 40000111: para el
+  # bottom-up eso es amortizacion de un sale & leaseback, no una compra.
+  entidades_financieras:
+    - "BANCO SANTANDER S.A."
+    - "BBVA, S.A."
+    - "BANCO DE SABADELL S.A."
+    - "CSI RENTING DE TECNOLOGIA, SAU"
+    - "CAIXABANK, S.A."
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 

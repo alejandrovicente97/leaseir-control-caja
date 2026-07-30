@@ -566,8 +566,23 @@ class MotorCaja:
                               or ["traspaso", "transferencia entre cuentas"]))
         c["es_traspaso"] = c["es_susp"] & c["nom_contra"].map(
             lambda n: any(p in norm(str(n)).lower() for p in pat_traspaso))
-        c["es_fin"] = c["cta_contra"].map(
-            lambda x: str(x).startswith(pref_fin)) & ~c["es_susp"]
+        # Las cuotas de sale & leaseback no estan en cuentas 52: el banco esta
+        # dado de alta como PROVEEDOR y la cuota va contra una 400. En julio son
+        # 80.248 euros a "BANCO SANTANDER S.A." en la cuenta 40000111, fuera del
+        # perimetro. En el bottom-up eso es deuda, y con razon: es amortizacion
+        # de un sale & leaseback, no una compra.
+        # No se inventa un criterio nuevo: se usa la MISMA lista de entidades
+        # que ya proyecta las cuotas en el forecast (cuotas_sl.operaciones), de
+        # modo que el ejecutado y la proyeccion trazan la frontera igual.
+        ents = {norm(o.get("proveedor", "")) for o in
+                (self.cfg.get("cuotas_sl") or {}).get("operaciones") or []}
+        ents |= {norm(x) for x in
+                 (self.cfg.get("cuadre") or {}).get("entidades_financieras") or []}
+        ents.discard("")
+        c["es_sl"] = c["nom_contra"].map(
+            lambda n: bool(n) and norm(str(n)) in ents)
+        c["es_fin"] = (c["cta_contra"].map(lambda x: str(x).startswith(pref_fin))
+                       | c["es_sl"]) & ~c["es_susp"]
 
         variacion = float(c["importe"].sum())
         financiacion = float(c[c["es_fin"]]["importe"].sum())
