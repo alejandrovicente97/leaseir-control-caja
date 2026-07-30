@@ -239,21 +239,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         kpi("Vencido a proveedores", eur(-vencido),
             f"{int((prov['vencido'] > 0.01).sum()) if not prov.empty else 0} proveedores",
             "aviso" if vencido > 200_000 else ""),
-        kpi("Cobertura de tesorería",
-            f'{(fc["saldo_actual"] + fc["polizas_disponible"]) / abs(m0["cash_out"]):.1f}×'
-            if m0["cash_out"] else "—",
-            "saldo + pólizas / pagos del mes"),
     ])
-
-    # ---- alertas ----------------------------------------------------------
-    if alertas:
-        ico = {"critico": "▲", "aviso": "●"}
-        al_html = "".join(
-            f'<li class="{a["nivel"]}"><span class="ico">{ico.get(a["nivel"], "●")}</span>'
-            f'{esc(a["texto"])}</li>' for a in alertas)
-        alertas_html = f'<ul class="alertas">{al_html}</ul>'
-    else:
-        alertas_html = '<p class="vacio">Sin alertas.</p>'
 
     # ---- tabla forecast ---------------------------------------------------
     def fila(et, clave, tipo=""):
@@ -564,12 +550,6 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 </div>
 
 <div class="kpis">{kpis}</div>
-
-<section>
-  <h2>Alertas</h2>
-  <p class="h2n">Lo que hay que mirar hoy.</p>
-  {alertas_html}
-</section>
 
 <section>
   <h2>Evolución de la caja</h2>
