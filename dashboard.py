@@ -651,6 +651,20 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                     '(impuestos, comisiones). Requiere el permiso '
                     '<code>accounting:daily-ledger.read</code>.</p>')
 
+    # ---- serie de unlevered ejecutado -------------------------------------
+    su = meta.get("serie_unlevered") or []
+    if su:
+        f_su = [[esc(x["etiqueta"]), eur(x["variacion_caja"]),
+                 f'<span class="{"neg" if x["financiacion"] < 0 else ""}">'
+                 f'{eur(x["financiacion"])}</span>',
+                 f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
+                 f'{eur(x["unlevered"])}</span></b>'] for x in su]
+        t_serie = tabla(["Mes", "Variación de caja", "Financiación",
+                         "Unlevered ejecutado"], f_su,
+                        alineacion=["", "r", "r", "r"])
+    else:
+        t_serie = ('<p class="vacio">Sin libro diario para meses anteriores.</p>')
+
     # ---- avisos de calidad del dato ---------------------------------------
     dq = meta.get("calidad", [])
     dq_html = ("<ul class='dq'>" + "".join(f"<li>{d}</li>" for d in dq) + "</ul>") \
@@ -1002,6 +1016,14 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
      arriba, quitando lo que es financiación. La cuenta por facturas se queda
      como desglose, pero no como cifra: solo ve los pagos que llevan factura.</p>
     {t_puente}
+  </section>
+
+  <section>
+    <h2>Unlevered ejecutado de los meses cerrados</h2>
+    <p class="h2n">La misma cuenta, mes a mes. Para contrastarlo contra el
+     bottom-up sin discutir una sola cifra: si la diferencia se repite todos los
+     meses es un criterio distinto; si sale en uno solo, es un apunte.</p>
+    {t_serie}
   </section>
 
   <section>

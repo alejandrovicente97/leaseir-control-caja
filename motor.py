@@ -545,6 +545,24 @@ class MotorCaja:
             "n_apuntes": int(len(c)),
         }
 
+    def serie_unlevered(self, n: int = 6) -> list:
+        """
+        El unlevered ejecutado de los ultimos meses, calculado igual que el del
+        mes en curso. Sirve para contrastar contra el bottom-up mes a mes en
+        vez de discutir una sola cifra: si la diferencia es la misma todos los
+        meses es un criterio distinto, y si aparece en uno solo es un apunte.
+        """
+        dia = self.d.get("diario")
+        if dia is None or dia.empty:
+            return []
+        salida = []
+        for i in range(n, 0, -1):
+            m = suma_meses(self.mes, -i)
+            u = self.unlevered_ejecutado(m)
+            if u:
+                salida.append({"mes": m, "etiqueta": nombre_mes(m), **u})
+        return salida
+
     def realizados_mes(self, mes: str | None = None) -> pd.DataFrame:
         """Cobros y pagos liquidados del mes, factura a factura."""
         r = self.d.get("realizados")
