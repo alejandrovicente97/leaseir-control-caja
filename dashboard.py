@@ -207,6 +207,41 @@ def tabla(cabeceras, filas, alineacion=None, clases=None):
     return f'<table><thead><tr>{th}</tr></thead><tbody>{"".join(tr)}</tbody></table>'
 
 
+
+
+def bloque_cuadre_proyeccion(filas, etiquetas):
+    """saldo inicial + cash in + cash out = saldo final, mes a mes."""
+    f, cl = [], []
+    for r in filas:
+        marca = ('<span class="chip ok">cuadra</span>' if r["cuadra"]
+                 else f'<span class="chip crit">{eur(r["diferencia"])}</span>')
+        f.append([esc(r["etiqueta"]), eur(r["saldo_inicial"]), eur(r["cash_in"]),
+                  eur(r["cash_out"]), f'<b>{eur(r["fcf"])}</b>',
+                  f'<b>{eur(r["saldo_final"])}</b>', marca])
+        cl.append("")
+    return tabla(["Mes", "Saldo inicial", "Cash in", "Cash out",
+                  "Unlevered FCF", "Saldo final", "Check"], f, clases=cl)
+
+
+def detalle_desplegable(grupos, cabeceras, alineacion=None, vacio="Sin movimientos."):
+    """
+    Una fila por tercero que se despliega y muestra sus facturas.
+    grupos = [(titulo, resumen_html, [filas_de_factura]), ...]
+    """
+    if not grupos:
+        return f'<p class="vacio">{esc(vacio)}</p>'
+    out = []
+    for titulo, resumen, filas in grupos:
+        out.append(
+            f'<details class="terc"><summary>'
+            f'<span class="t-nom">{esc(titulo)}</span>'
+            f'<span class="t-res">{resumen}</span>'
+            f'<span class="t-n">{len(filas)} fra.</span></summary>'
+            f'<div class="t-body">{tabla(cabeceras, filas, alineacion)}</div>'
+            f'</details>')
+    return "".join(out)
+
+
 # ---------------------------------------------------------------------------
 #  DASHBOARD
 # ---------------------------------------------------------------------------
@@ -320,6 +355,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     f_sal.append(['<b>Total salarios</b>', f'<b>{eur(sum(d["importe"] for d in det["salarios"]))}</b>'])
     f_sl = [[esc(d["concepto"]), eur(d["importe"])] for d in det["cuotas_sl"]]
     f_sl.append(['<b>Total cuotas</b>', f'<b>{eur(sum(d["importe"] for d in det["cuotas_sl"]))}</b>'])
+    t_sal = tabla(["Concepto", "Mensual"], f_sal)
+    t_sl = tabla(["Operación", "Mensual"], f_sl)
 
     recu = fc["recurrentes"]
     if not recu.empty:
@@ -389,6 +426,88 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     dq_html = ("<ul class='dq'>" + "".join(f"<li>{d}</li>" for d in dq) + "</ul>") \
         if dq else '<p class="vacio">Sin incidencias.</p>'
 
+
+    # ---- KPIs de las pestanas de cobros y pagos --------------------------
+    n_cli = int((cli["pendiente_cobro"].abs() > 0.01).sum()) if not cli.empty else 0
+    cob_mes = float(cli["cuota_mes"].sum()) if not cli.empty else 0.0
+    top_cli = (cli.iloc[0]["cliente"], cli.iloc[0]["pendiente_cobro"]) if not cli.empty else ("—", 0)
+    kpis_cob = "".join([
+        kpi("Pendiente de cobro exigible", eur(pend_cobro), f"{n_cli} clientes"),
+        kpi("En retraso", eur(retraso),
+            f"{retraso / pend_cobro:.0%} del exigible" if pend_cobro else "—",
+            "aviso" if retraso > 300_000 else ""),
+        kpi(f"Cuota teórica de {m0['etiqueta']}", eur(cob_mes), "según calendario de Eli"),
+        kpi("Mayor riesgo", eur(top_cli[1]), esc(top_cli[0])[:34]),
+    ])
+
+    n_prov = int((prov["pendiente_total"].abs() > 0.01).sum()) if not prov.empty else 0
+    n_venc = int((prov["vencido"] > 0.01).sum()) if not prov.empty else 0
+    pend_prov = float(prov["pendiente_total"].sum()) if not prov.empty else 0.0
+    no_holded = m0["salarios"] + m0["cuotas_sl"] + m0["recurrentes_proyectados"] + m0["otros_fijos"]
+    kpis_pag = "".join([
+        kpi("Pendiente a proveedores", eur(-pend_prov), f"{n_prov} proveedores"),
+        kpi("Vencido y sin pagar", eur(-vencido), f"{n_venc} proveedores",
+            "aviso" if vencido > 200_000 else ""),
+        kpi(f"Pago previsto {m0['etiqueta']}", eur(m0["pago_proveedores"]),
+            "vencimientos hasta fin de mes"),
+        kpi("Fuera de Holded", eur(no_holded),
+            "salarios, cuotas S&L y recurrentes"),
+    ])
+
+    # ---- detalle factura a factura ---------------------------------------
+    dc = fc.get("detalle_cobros")
+    grupos_cob = []
+    if dc is not None and not dc.empty:
+        act = dc[(dc["pendiente_cobro"].abs() > 0.01) |
+                 (dc[[f"teorico_{m}" for m in meses[1:]]].abs().sum(axis=1) > 0.01)]
+        for cliente, g in act.groupby("cliente"):
+            g = g.sort_values("pendiente_cobro", ascending=False)
+            pend, ret = g["pendiente_cobro"].sum(), g["retraso"].sum()
+            resumen = (f'<b>{eur(pend)}</b> exigible'
+                       + (f' · <span class="rojo">{eur(ret)} en retraso</span>' if ret > 0.01 else ''))
+            filas = [[esc(r["num"]), esc(r["cuenta"])[:42],
+                      esc(r["vencimiento"] or "—"), eur(r["total"]),
+                      eur(r["teorico_hoy"]), eur(r["liquidado"]),
+                      eur(r["pendiente_cobro"]),
+                      (f'<span class="chip crit">{eur(r["retraso"])}</span>' if r["retraso"] > 0.01
+                       else '<span class="chip ok">al día</span>')]
+                     + [eur(r[f"teorico_{m}"]) for m in meses[1:]]
+                     for _, r in g.iterrows()]
+            grupos_cob.append((cliente, resumen, filas))
+        grupos_cob.sort(key=lambda x: -sum(float(str(f[6]).replace(" ", "").replace("€", "").replace("—", "0") or 0)
+                                           for f in x[2]) if False else 0)
+        grupos_cob = sorted(
+            grupos_cob,
+            key=lambda x: -act[act["cliente"] == x[0]]["pendiente_cobro"].sum())
+    cab_cob = (["Factura", "Concepto", "Vencimiento", "Importe", "Teórico hoy",
+                "Cobrado", "Exigible", "Retraso"] + [f"Teórico {e}" for e in etiquetas[1:]])
+    det_cobros = detalle_desplegable(grupos_cob, cab_cob,
+                                     vacio="Sin cobros pendientes.")
+
+    dp = fc.get("detalle_pagos")
+    grupos_pag = []
+    if dp is not None and not dp.empty:
+        for prov_nom, g in dp.groupby("proveedor"):
+            g = g.sort_values("vencimiento")
+            pend = g["pendiente"].sum()
+            venc = g[g["vencido"]]["pendiente"].sum()
+            resumen = (f'<b>{eur(-pend)}</b> pendiente'
+                       + (f' · <span class="rojo">{eur(-venc)} vencido</span>' if venc > 0.01 else ''))
+            filas = [[esc(r["num"]), esc(r["cuenta"])[:42],
+                      esc(r["vencimiento"] or "—"), esc(r["tipologia"]),
+                      eur(-r["total"]), eur(-r["liquidado"]), eur(-r["pendiente"]),
+                      (f'<span class="chip crit">vencido</span>' if r["vencido"]
+                       else f'<span class="chip ok">{esc(r["estado"])}</span>')]
+                     for _, r in g.iterrows()]
+            grupos_pag.append((prov_nom, resumen, filas))
+        grupos_pag = sorted(grupos_pag,
+                            key=lambda x: -dp[dp["proveedor"] == x[0]]["pendiente"].sum())
+    cab_pag = ["Factura", "Concepto", "Vencimiento", "Tipología",
+               "Importe", "Pagado", "Pendiente", "Estado"]
+    det_pagos = detalle_desplegable(grupos_pag, cab_pag,
+                                    vacio="Sin pagos pendientes.")
+
+    cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
 
     # ---- contraste con el Excel ------------------------------------------
     ce = meta.get("contraste") or {}
@@ -520,6 +639,35 @@ tr.sub:hover td,tr.total:hover td{{background:inherit}}
 .dq li{{margin-bottom:6px}}
 details{{margin-top:12px}}
 summary{{cursor:pointer;font-size:13px;color:{P['ink2']};font-weight:600;padding:6px 0}}
+.tabs{{display:flex;gap:6px;margin:0 0 20px;border-bottom:2px solid {P['grid']}}}
+.tab{{appearance:none;background:none;border:0;border-bottom:3px solid transparent;
+ margin-bottom:-2px;padding:11px 18px;font-size:14.5px;font-weight:600;
+ color:{P['muted']};cursor:pointer;font-family:inherit;transition:color .12s}}
+.tab:hover{{color:{P['ink2']}}}
+.tab.activa{{color:{P['brand']};border-bottom-color:{P['brand']}}}
+.panel{{display:none}}
+.panel.visible{{display:block}}
+.buscador{{margin:16px 0 10px}}
+.buscador input{{width:100%;max-width:340px;padding:8px 12px;font-size:14px;
+ font-family:inherit;border:1px solid {P['axis']};border-radius:4px;
+ background:{P['surface']};color:{P['ink']}}}
+.buscador input:focus{{outline:2px solid {P['brand3']};outline-offset:-1px}}
+.detalles{{border-top:1px solid {P['grid']}}}
+details.terc{{border-bottom:1px solid {P['grid']};margin:0}}
+details.terc>summary{{display:flex;align-items:center;gap:14px;padding:11px 6px;
+ cursor:pointer;font-size:14px;list-style:none}}
+details.terc>summary::-webkit-details-marker{{display:none}}
+details.terc>summary::before{{content:"▸";color:{P['muted']};font-size:11px;
+ width:12px;flex:none;transition:transform .12s}}
+details.terc[open]>summary::before{{transform:rotate(90deg)}}
+details.terc>summary:hover{{background:#f7f9fa}}
+details.terc[open]>summary{{background:#f1f4f5;font-weight:600}}
+.t-nom{{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.t-res{{color:{P['ink2']};font-size:13px;white-space:nowrap;font-variant-numeric:tabular-nums}}
+.t-n{{color:{P['muted']};font-size:12px;width:64px;text-align:right;flex:none}}
+.t-body{{padding:4px 6px 16px;overflow-x:auto}}
+.t-body table{{font-size:12.5px}}
+.rojo{{color:{P['crit']}}}
 .pie{{margin:30px -20px -72px;padding:20px;background:{P['brand']};color:#a9c4ce;
  font-size:11.5px;line-height:1.65;display:flex;justify-content:space-between;
  gap:24px;flex-wrap:wrap}}
@@ -549,74 +697,123 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   <span>Generado <b>{datetime.now():%d/%m/%Y · %H:%M}</b></span>
 </div>
 
-<div class="kpis">{kpis}</div>
+<nav class="tabs">
+  <button class="tab activa" data-p="p1">Forecast de caja</button>
+  <button class="tab" data-p="p2">Cobros</button>
+  <button class="tab" data-p="p3">Pagos</button>
+</nav>
 
-<section>
-  <h2>Evolución de la caja</h2>
-  <p class="h2n">Saldo de partida, flujo libre de cada mes y saldo al final del horizonte.</p>
-  {wf}
-</section>
+<div id="p1" class="panel visible">
 
-<section>
-  <h2>Forecast de caja</h2>
-  <p class="h2n">Cobros y pagos por mes. Los pagos a proveedor arrastran los vencidos
-   al mes en curso; las partidas que no están en Holded (salarios, cuotas de banco,
-   recurrentes) se proyectan aparte.</p>
-  {tabla_fc}
-  <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
-</section>
+  <div class="kpis">{kpis}</div>
 
-<section>
-  <h2>Cobros de clientes</h2>
-  <p class="h2n">Pendiente exigible = cuota teórica acumulada del calendario de Eli
-   menos lo realmente cobrado. No es el saldo vivo de la factura.</p>
-  {g_cob}
-  <details open><summary>Detalle por cliente</summary>{t_cob}</details>
-</section>
+  <section>
+    <h2>Evolución de la caja</h2>
+    <p class="h2n">Saldo de partida, flujo libre de cada mes y saldo al final del horizonte.</p>
+    {wf}
+  </section>
 
-<section>
-  <h2>Pagos a proveedores</h2>
-  <p class="h2n">Pendiente por proveedor y reparto por mes de vencimiento.</p>
-  {g_pag}
-  <details open><summary>Detalle por proveedor</summary>{t_pag}</details>
-</section>
+  <section>
+    <h2>Forecast de caja</h2>
+    <p class="h2n">Cobros y pagos por mes. Los pagos a proveedor arrastran los vencidos
+     al mes en curso; las partidas que no están en Holded (salarios, cuotas de banco,
+     recurrentes) se proyectan aparte.</p>
+    {tabla_fc}
+    <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
+  </section>
 
-<section>
-  <h2>Lo que Holded no sabe</h2>
-  <p class="h2n">Partidas que no existen como factura y que sin embargo hay que pagar
-   o cobrar. Es justo la razón por la que el forecast de Holded se queda corto.</p>
-  <div class="grid2">
-    <div><h2 style="font-size:15px">Salarios y Seguridad Social</h2>{tabla(["Concepto", "Mensual"], f_sal)}</div>
-    <div><h2 style="font-size:15px">Cuotas S&amp;L y renting bancario</h2>{tabla(["Operación", "Mensual"], f_sl)}</div>
-  </div>
-  <h2 style="font-size:15px;margin-top:22px">Gastos recurrentes proyectados</h2>
-  <p class="h2n">Solo se proyectan los meses en los que aún no hay factura en Holded,
-   así que nunca se duplica.</p>
-  {t_rec}
-  <h2 style="font-size:15px;margin-top:22px">Cuotas de renting pendientes de facturar</h2>
-  <p class="h2n">Están en el calendario de Eli y todavía no tienen factura emitida.</p>
-  {t_ren}
-</section>
+  <section>
+    <h2>Check de caja</h2>
+    <p class="h2n">Saldo inicial + cash in + cash out = saldo final. Cada mes se
+     calcula por separado y se compara: si algo no cuadrase, sería un error del motor,
+     no una diferencia de criterio.</p>
+    {cuadre_proy}
+    <h2 style="font-size:15px;margin-top:24px">Cuadre contra el banco</h2>
+    <p class="h2n">Lo ejecutado del mes contra la variación real de saldo.</p>
+    {cuadre_html}
+  </section>
 
-{contraste_html}
+  <section>
+    <h2>Posición bancaria</h2>
+    {t_ban}
+  </section>
 
-<section>
-  <h2>Cuadre de caja</h2>
-  <p class="h2n">Cobros − pagos del mes debe ser igual a la variación del saldo
-   bancario. Si no cuadra, falta un movimiento.</p>
-  {cuadre_html}
-</section>
+  {contraste_html}
 
-<section>
-  <h2>Posición bancaria</h2>
-  {t_ban}
-</section>
+  <section>
+    <h2>Calidad del dato</h2>
+    <p class="h2n">Incidencias detectadas al construir el forecast.</p>
+    {dq_html}
+  </section>
 
-<section>
-  <h2>Calidad del dato</h2>
-  <p class="h2n">Incidencias detectadas al construir el forecast.</p>
-  {dq_html}
-</section>
+</div>
+
+<div id="p2" class="panel">
+
+  <div class="kpis">{kpis_cob}</div>
+
+  <section>
+    <h2>Pendiente de cobro por cliente</h2>
+    <p class="h2n">Exigible = cuota teórica acumulada del calendario de Eli menos lo
+     realmente cobrado. De un renting a 36 meses solo cuenta lo ya vencido.</p>
+    {g_cob}
+  </section>
+
+  <section>
+    <h2>Detalle factura a factura</h2>
+    <p class="h2n">Despliega cada cliente para ver sus facturas: importe, cuánto
+     debería estar cobrado a día de hoy, cuánto se ha cobrado y qué queda.</p>
+    <div class="buscador">
+      <input type="text" id="bc" placeholder="Filtrar cliente…" oninput="filtrar('p2c', this.value)">
+    </div>
+    <div id="p2c" class="detalles">{det_cobros}</div>
+  </section>
+
+  <section>
+    <h2>Cuotas de renting pendientes de facturar</h2>
+    <p class="h2n">Están en el calendario de Eli y todavía no tienen factura emitida
+     en Holded. Entran en el forecast aunque Holded no las conozca.</p>
+    {t_ren}
+  </section>
+
+</div>
+
+<div id="p3" class="panel">
+
+  <div class="kpis">{kpis_pag}</div>
+
+  <section>
+    <h2>Pendiente de pago por proveedor</h2>
+    <p class="h2n">El forecast de cada mes recoge todo lo pendiente con vencimiento
+     hasta fin de ese mes, así que los vencidos se arrastran al mes en curso.</p>
+    {g_pag}
+  </section>
+
+  <section>
+    <h2>Detalle factura a factura</h2>
+    <p class="h2n">Despliega cada proveedor para ver factura, concepto, vencimiento
+     y estado.</p>
+    <div class="buscador">
+      <input type="text" id="bp" placeholder="Filtrar proveedor…" oninput="filtrar('p3p', this.value)">
+    </div>
+    <div id="p3p" class="detalles">{det_pagos}</div>
+  </section>
+
+  <section>
+    <h2>Pagos que no están en Holded</h2>
+    <p class="h2n">No existen como factura y sin embargo hay que pagarlos. Es la
+     razón principal por la que el forecast de Holded se queda corto.</p>
+    <div class="grid2">
+      <div><h2 style="font-size:15px">Salarios y Seguridad Social</h2>{t_sal}</div>
+      <div><h2 style="font-size:15px">Cuotas S&amp;L y renting bancario</h2>{t_sl}</div>
+    </div>
+    <h2 style="font-size:15px;margin-top:22px">Gastos recurrentes proyectados</h2>
+    <p class="h2n">Solo se proyectan los meses en los que aún no hay factura en Holded,
+     así que nunca se duplica.</p>
+    {t_rec}
+  </section>
+
+</div>
 
 <footer class="pie">
   <div class="pie-l"><b>LEASEIR TECHNOLOGIES S.L.U.</b> · leaseir.com</div>
@@ -624,4 +821,25 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
    Generado automáticamente a partir de Holded y del calendario de cobros.
    No difundir fuera del Comité de Dirección.</div>
 </footer>
-</div></body></html>"""
+</div>
+
+<script>
+document.querySelectorAll('.tab').forEach(function (b) {{
+  b.addEventListener('click', function () {{
+    document.querySelectorAll('.tab').forEach(function (x) {{ x.classList.remove('activa'); }});
+    document.querySelectorAll('.panel').forEach(function (x) {{ x.classList.remove('visible'); }});
+    b.classList.add('activa');
+    document.getElementById(b.dataset.p).classList.add('visible');
+    window.scrollTo({{ top: 0, behavior: 'smooth' }});
+  }});
+}});
+
+function filtrar(id, q) {{
+  var t = (q || '').toLowerCase();
+  document.getElementById(id).querySelectorAll('details.terc').forEach(function (d) {{
+    var n = d.querySelector('.t-nom').textContent.toLowerCase();
+    d.style.display = n.indexOf(t) === -1 ? 'none' : '';
+  }});
+}}
+</script>
+</body></html>"""
