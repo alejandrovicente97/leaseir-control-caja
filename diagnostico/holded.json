@@ -1,5 +1,5 @@
 {
- "extraido_en": "2026-07-30T16:25:35",
+ "extraido_en": "2026-07-30T16:48:05",
  "desde": "2022-01-01",
  "hasta": "2028-12-31",
  "api": "v2",
@@ -253,7 +253,5 @@
  "avisos": [
   "recibos_venta ha venido vacio"
  ],
- "truncados": {
-  "https://api.holded.com/api/v2/credit-notes": 100
- }
+ "truncados": {}
 }
