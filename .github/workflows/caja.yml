@@ -90,7 +90,22 @@ jobs:
           # diagnosticar la extraccion sin depender del log de Actions
           git add -f diagnostico/holded.json || true
           git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
-          git push
+          # Si alguien ha empujado a main mientras corria la extraccion -tres
+          # minutos son de sobra-, el push se rechaza y el run entero sale en
+          # rojo con el dashboard ya calculado. Se reintenta reintegrando lo
+          # que haya llegado. --rebase porque lo nuestro es un commit de salida
+          # que va encima de lo que haya, nunca al reves.
+          for intento in 1 2 3 4 5; do
+            if git push; then
+              echo "publicado en el intento $intento"; exit 0
+            fi
+            echo "::warning::push rechazado (intento $intento), reintegrando main"
+            git pull --rebase --autostash origin main || {
+              echo "::error::el rebase no ha podido resolverse solo"; exit 1
+            }
+            sleep $((intento * 3))
+          done
+          echo "::error::no se ha podido publicar tras 5 intentos"; exit 1
 
       # GitHub Pages queda descartado a proposito: en los planes Free, Pro y Team
       # el sitio es PUBLICO aunque el repositorio sea privado. Se despliega en
