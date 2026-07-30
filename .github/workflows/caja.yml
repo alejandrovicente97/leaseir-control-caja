@@ -14,8 +14,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: caja
@@ -75,17 +73,23 @@ jobs:
           git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
           git push
 
-      - name: Subir a GitHub Pages
-        uses: actions/upload-pages-artifact@v3
+      # GitHub Pages queda descartado a proposito: en los planes Free, Pro y Team
+      # el sitio es PUBLICO aunque el repositorio sea privado. Se despliega en
+      # Cloudflare Pages, que si permite poner una puerta de login delante
+      # (Cloudflare Access) sin coste.
+      - name: Publicar en Cloudflare Pages
+        if: ${{ env.CF_TOKEN != '' }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        uses: cloudflare/wrangler-action@v3
         with:
-          path: publicado
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy publicado --project-name=caja-leaseir --branch=main
 
-  publicar:
-    needs: forecast
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Aviso si Cloudflare no esta configurado
+        if: ${{ env.CF_TOKEN == '' }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "::warning::Sin CLOUDFLARE_API_TOKEN: el dashboard queda solo como artefacto y en publicado/. Ver docs/CLOUDFLARE.md"
