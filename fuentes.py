@@ -115,8 +115,8 @@ COLS_DOC = ["id", "num", "tercero", "cuenta", "fecha", "vencimiento", "total",
 COLS_REAL = ["fecha", "mes", "sentido", "tercero", "num", "doc_id", "importe",
              "banco", "concepto", "conciliado", "tipo_api"]
 COLS_PLAN = ["numero", "nombre", "grupo", "debe", "haber", "saldo"]
-COLS_DIARIO = ["fecha", "mes", "asiento", "linea", "cuenta", "grupo_pgc",
-               "concepto", "doc", "debe", "haber", "importe"]
+COLS_DIARIO = ["fecha", "mes", "asiento", "linea", "cuenta", "cuenta_nombre",
+               "grupo_pgc", "concepto", "doc", "debe", "haber", "importe"]
 
 
 # Grupos del Plan General Contable, por el primer digito o los tres primeros.
@@ -418,6 +418,10 @@ def desde_holded(ruta: Path) -> dict:
         })
 
     # ---- libro diario -----------------------------------------------------
+    # nombre real de cada cuenta, del plan contable. Sin esto el puente dice
+    # "52000042 Deudas a corto con entidades de credito" cuando en realidad es
+    # la tarjeta American Express, y no hay forma de discutir el criterio.
+    nom_cta = {str(c["numero"]): c["nombre"] for c in plan if c.get("numero")}
     diario = []
     for e in d.get("libro_diario", []) or []:
         if not isinstance(e, dict):
@@ -431,6 +435,7 @@ def desde_holded(ruta: Path) -> dict:
             "asiento": _pri(e, "entry_number", "entryNumber", defecto=""),
             "linea": _pri(e, "line", defecto=""),
             "cuenta": str(cta),
+            "cuenta_nombre": nom_cta.get(str(cta), ""),
             "grupo_pgc": grupo_pgc(cta),
             "concepto": str(_pri(e, "description", "desc", defecto=""))[:90],
             "doc": str(_pri(e, "doc_description", "docDescription", defecto=""))[:90],

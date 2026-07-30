@@ -227,6 +227,12 @@ cuadre:
   # ella dentro el unlevered de julio daba -133.569 y sin ella -2.449. Se
   # enumeran las cuentas de socios una a una.
   cuentas_financiacion: ["17", "52", "527", "66", "551", "552", "553"]
+
+  # Cuentas puente: el dinero se ha movido pero todavia no se ha llevado a su
+  # cuenta definitiva. Ni financiacion ni explotacion. En julio habia 145.000
+  # aqui: dejarlos dentro mueve el unlevered esa cifra sin que nadie sepa de
+  # que. Se sacan y el panel dice cuanto queda por clasificar.
+  cuentas_suspenso: ["555", "554"]
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 

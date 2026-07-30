@@ -305,8 +305,10 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
             eur(eje.get("fcf", 0)),
-            (f"Caja {eur(eje.get('variacion_caja', 0))} menos financiación "
+            (f"Caja {eur(eje.get('variacion_caja', 0))} · financiación "
              f"{eur(eje.get('financiacion', 0))}"
+             + (f" · sin aplicar {eur(eje.get('suspenso', 0))}"
+                if abs(eje.get("suspenso", 0)) > 0.5 else "")
              if eje.get("fuente") == "libro diario" else
              f"Cobrado {eur(eje.get('cobros', 0))} · pagado {eur(eje.get('pagos', 0))}"),
             est_fcf),
@@ -617,18 +619,30 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     if eje.get("fuente") == "libro diario":
         f_pu = [["Variación real de caja del mes", eur(eje["variacion_caja"])]]
         for x in eje.get("detalle_financiacion") or []:
+            # el nombre real de la cuenta, no solo el grupo del PGC: "52000042"
+            # dice "Deudas a corto con entidades de credito" y en realidad es
+            # la tarjeta American Express. Sin el nombre no hay criterio que
+            # discutir.
+            nom = x.get("nombre") or x["concepto"]
             f_pu.append([f"&nbsp;&nbsp;<code>{esc(x.get('cuenta',''))}</code> "
-                         f"{esc(x['concepto'])}",
+                         f"{esc(nom)}",
                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
                          f'{eur(x["importe"])}</span>'])
         f_pu += [["Financiación incluida en esa variación",
                   f'<span class="{"neg" if eje["financiacion"] < 0 else ""}">'
-                  f'{eur(eje["financiacion"])}</span>'],
-                 ["<b>Unlevered FCF ejecutado</b> = variación − financiación",
+                  f'{eur(eje["financiacion"])}</span>']]
+        susp = eje.get("suspenso", 0)
+        if abs(susp) > 0.5:
+            f_pu.append([
+                "Partidas pendientes de aplicar (cuentas puente) — "
+                "<b>hay que clasificarlas</b>",
+                f'<span class="{"neg" if susp < 0 else ""}">{eur(susp)}</span>'])
+        f_pu += [["<b>Unlevered FCF ejecutado</b> = variación − financiación − puente",
                   f'<b>{eur(eje["fcf"])}</b>'],
                  ["Para contrastar: la misma cifra contando solo facturas",
                   eur(eje.get("por_facturas", 0))]]
-        cl_pu = [""] * (len(f_pu) - 3) + ["sub", "total", ""]
+        n_sub = 2 if abs(eje.get("suspenso", 0)) > 0.5 else 1
+        cl_pu = [""] * (len(f_pu) - 2 - n_sub) + ["sub"] * n_sub + ["total", ""]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
         # Lo que se ha quedado fuera del perimetro, por si falta alguna cuenta
@@ -639,8 +653,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             t_puente += (
                 '<details><summary>Qué se ha quedado fuera del perímetro de '
                 'financiación (mayores movimientos)</summary>'
-                + tabla(["Cuenta", "Concepto", "Importe"],
-                        [[f'<code>{esc(x["cuenta"])}</code>', esc(x["concepto"]),
+                + tabla(["Cuenta", "Nombre", "Importe"],
+                        [[f'<code>{esc(x["cuenta"])}</code>',
+                          esc(x.get("nombre") or x["concepto"]),
                           f'<span class="{"neg" if x["importe"] < 0 else ""}">'
                           f'{eur(x["importe"])}</span>'] for x in fp],
                         alineacion=["", "", "r"])

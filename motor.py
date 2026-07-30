@@ -504,43 +504,57 @@ class MotorCaja:
         pref_fin = tuple(str(p) for p in
                          (self.cfg.get("cuadre") or {}).get("cuentas_financiacion")
                          or ["17", "52", "527", "66", "55"])
-        contra, nat = {}, {}
+        pref_susp = tuple(str(p) for p in
+                          (self.cfg.get("cuadre") or {}).get("cuentas_suspenso")
+                          or ["555"])
+        contra, nat, nomb = {}, {}, {}
         for asiento, g in resto.groupby("asiento"):
             i = g["importe"].abs().idxmax()
             contra[asiento] = str(g.loc[i, "cuenta"])
             nat[asiento] = g.loc[i, "grupo_pgc"]
+            nomb[asiento] = g.loc[i, "cuenta_nombre"] if "cuenta_nombre" in g else ""
 
         c = caja.copy()
         c["cta_contra"] = c["asiento"].map(lambda a: contra.get(a, ""))
+        c["nom_contra"] = c["asiento"].map(lambda a: nomb.get(a, ""))
+        # Suspenso (555, partidas pendientes de aplicar) no es ni financiacion
+        # ni explotacion: es dinero que ha entrado o salido y todavia no se ha
+        # llevado a su cuenta. Sumarlo al unlevered lo mueve 145.000 euros sin
+        # que nadie sepa de que. Se saca y se dice cuanto queda por clasificar.
+        c["es_susp"] = c["cta_contra"].map(lambda x: str(x).startswith(pref_susp))
         c["es_fin"] = c["cta_contra"].map(
-            lambda x: str(x).startswith(pref_fin))
+            lambda x: str(x).startswith(pref_fin)) & ~c["es_susp"]
 
         variacion = float(c["importe"].sum())
         financiacion = float(c[c["es_fin"]]["importe"].sum())
+        suspenso = float(c[c["es_susp"]]["importe"].sum())
         # El detalle va por CUENTA y no solo por grupo: donde se pone la
         # frontera de "financiacion" mueve la cifra entera, y eso hay que
         # poder verlo cuenta a cuenta para discutirlo, no aceptarlo.
         f = c[c["es_fin"]].copy()
         f["nat"] = f["asiento"].map(nat)
-        det = (f.groupby(["cta_contra", "nat"])["importe"].sum()
+        det = (f.groupby(["cta_contra", "nat", "nom_contra"])["importe"].sum()
                  .reset_index().sort_values("importe"))
         # y lo que se ha quedado FUERA del perimetro tambien se ensena, por si
         # falta alguna cuenta que si deberia estar
-        fuera = c[~c["es_fin"]].copy()
+        fuera = c[~c["es_fin"] & ~c["es_susp"]].copy()
         fuera["nat"] = fuera["asiento"].map(nat)
-        top_fuera = (fuera.groupby(["cta_contra", "nat"])["importe"].sum()
+        top_fuera = (fuera.groupby(["cta_contra", "nat", "nom_contra"])["importe"].sum()
                           .reset_index())
         top_fuera = top_fuera.reindex(
             top_fuera["importe"].abs().sort_values(ascending=False).index).head(12)
         return {
             "variacion_caja": variacion,
             "financiacion": financiacion,
-            "unlevered": variacion - financiacion,
+            "suspenso": suspenso,
+            "unlevered": variacion - financiacion - suspenso,
             "detalle_financiacion": [
                 {"cuenta": r["cta_contra"], "concepto": r["nat"],
+                 "nombre": r.get("nom_contra", ""),
                  "importe": float(r["importe"])} for _, r in det.iterrows()],
             "fuera_perimetro": [
                 {"cuenta": r["cta_contra"], "concepto": r["nat"],
+                 "nombre": r.get("nom_contra", ""),
                  "importe": float(r["importe"])} for _, r in top_fuera.iterrows()],
             "n_apuntes": int(len(c)),
         }
@@ -725,6 +739,7 @@ class MotorCaja:
             eje["por_facturas"] = eje["fcf"]
             eje["variacion_caja"] = ul["variacion_caja"]
             eje["financiacion"] = ul["financiacion"]
+            eje["suspenso"] = ul["suspenso"]
             eje["detalle_financiacion"] = ul["detalle_financiacion"]
             eje["fuera_perimetro"] = ul["fuera_perimetro"]
             eje["fcf"] = ul["unlevered"]
