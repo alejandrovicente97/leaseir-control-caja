@@ -574,11 +574,21 @@ class MotorCaja:
         # No se inventa un criterio nuevo: se usa la MISMA lista de entidades
         # que ya proyecta las cuotas en el forecast (cuotas_sl.operaciones), de
         # modo que el ejecutado y la proyeccion trazan la frontera igual.
-        ents = {norm(o.get("proveedor", "")) for o in
-                (self.cfg.get("cuotas_sl") or {}).get("operaciones") or []}
-        ents |= {norm(x) for x in
-                 (self.cfg.get("cuadre") or {}).get("entidades_financieras") or []}
-        ents.discard("")
+        # APAGADO POR DEFECTO, y la razon esta medida. Se probo meter las cuotas
+        # dentro de financiacion y el contraste contra el bottom-up EMPEORO en
+        # los cuatro meses comparables: abril paso de 4k de diferencia a 115k,
+        # marzo de 52k a 463k. O sea que en el modelo de Alejandro la cuota de
+        # sale & leaseback es explotacion, no servicio de deuda; en la tabla de
+        # deuda esta el saldo vivo, no la cuota del mes.
+        # Se deja el interruptor porque el criterio es defendible y puede
+        # cambiar, pero el defecto lo decide el contraste y no mi opinion.
+        ents = set()
+        if (self.cfg.get("cuadre") or {}).get("cuotas_sl_son_financiacion", False):
+            ents = {norm(o.get("proveedor", "")) for o in
+                    (self.cfg.get("cuotas_sl") or {}).get("operaciones") or []}
+            ents |= {norm(x) for x in
+                     (self.cfg.get("cuadre") or {}).get("entidades_financieras") or []}
+            ents.discard("")
         c["es_sl"] = c["nom_contra"].map(
             lambda n: bool(n) and norm(str(n)) in ents)
         c["es_fin"] = (c["cta_contra"].map(lambda x: str(x).startswith(pref_fin))

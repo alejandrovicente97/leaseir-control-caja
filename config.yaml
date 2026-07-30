@@ -249,6 +249,13 @@ cuadre:
   # proveedor. Las de cuotas_sl.operaciones entran solas; aqui van las demas.
   # En julio son 80.248 euros a Banco Santander en la cuenta 40000111: para el
   # bottom-up eso es amortizacion de un sale & leaseback, no una compra.
+  # Probado y descartado: con las cuotas de S&L dentro de financiacion, el
+  # contraste contra el bottom-up empeora en los cuatro meses comparables
+  # (abril de 4k a 115k de diferencia, marzo de 52k a 463k). En el modelo de
+  # Alejandro la cuota es explotacion; en la tabla de deuda esta el saldo vivo,
+  # no la cuota. Se deja el interruptor por si el criterio cambia.
+  cuotas_sl_son_financiacion: false
+
   entidades_financieras:
     - "BANCO SANTANDER S.A."
     - "BBVA, S.A."

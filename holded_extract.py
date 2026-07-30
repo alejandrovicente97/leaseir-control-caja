@@ -29,7 +29,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 try:
@@ -97,10 +97,24 @@ def _inicio_diario() -> date:
     return date(t // 12, t % 12 + 1, 1)
 
 
+def _fin_diario() -> date:
+    """
+    Fin de mes, no hoy.
+
+    La amortizacion del prestamo del BBVA se ve en el banco el 29 de julio pero
+    el asiento esta fechado a fin de mes. Cortando en date.today() se perdian
+    95.810 euros de julio y la variacion de caja pasaba de -103.645 a -7.836
+    sin que nada avisara. Los asientos de cierre de mes se fechan a fin de mes:
+    hay que pedirlos hasta ahi.
+    """
+    h = date.today()
+    return date(h.year + (h.month == 12), h.month % 12 + 1, 1) - timedelta(days=1)
+
+
 PARAMS_V2 = {
     "libro_diario": lambda desde, hasta: {
         "start_date": str(max(desde, _inicio_diario())),
-        "end_date": str(min(hasta, date.today())),
+        "end_date": str(min(hasta, _fin_diario())),
     },
 }
 RECURSOS_V1 = {
