@@ -1,0 +1,91 @@
+name: Control de caja Leaseir
+
+# Cada dia laborable a las 05:30 UTC = 07:30 en Madrid (verano).
+# Tambien se puede lanzar a mano desde la pestana Actions.
+on:
+  schedule:
+    - cron: "30 5 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      mes:
+        description: "Mes en curso a forzar (YYYYMM). Vacio = mes actual"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: caja
+  cancel-in-progress: false
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Extraer Holded
+        env:
+          HOLDED_API_KEY: ${{ secrets.HOLDED_API_KEY }}
+        run: |
+          if [ -z "$HOLDED_API_KEY" ]; then
+            echo "::error::Falta el secret HOLDED_API_KEY"; exit 1
+          fi
+          python holded_extract.py --desde 2024-01-01 --destino datos/
+
+      - name: Descargar el calendario de cobros de Eli
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python -c "from google_sheets import descargar_sheet; descargar_sheet(destino='datos/calendario_eli.xlsx')"
+
+      - name: Calcular el forecast y generar el dashboard
+        run: |
+          python run.py \
+            --fuente holded \
+            --holded datos/holded.json \
+            --calendario datos/calendario_eli.xlsx \
+            --salida publicado/index.html \
+            ${{ github.event.inputs.mes && format('--mes {0}', github.event.inputs.mes) || '' }}
+
+      - name: Guardar el dashboard como artefacto privado
+        uses: actions/upload-artifact@v4
+        with:
+          name: caja-leaseir-${{ github.run_number }}
+          path: publicado/index.html
+          retention-days: 90
+
+      - name: Commitear el dashboard y el historico
+        run: |
+          git config user.name  "Motor de caja Leaseir"
+          git config user.email "actions@leaseir.com"
+          mkdir -p historico
+          cp publicado/index.html "historico/caja_$(date +%Y%m%d).html"
+          git add -f publicado/index.html historico/
+          git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
+          git push
+
+      - name: Subir a GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: publicado
+
+  publicar:
+    needs: forecast
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
