@@ -203,6 +203,11 @@ certidumbre:
 # 5. CUADRE DE CAJA
 # ---------------------------------------------------------------------------
 cuadre:
+  # Cuentas de clientes del plan contable para el check contra contabilidad.
+  # 430 Clientes, 431 Efectos comerciales a cobrar, 432 Clientes, operaciones
+  # de factoring. Si el saldo de estas cuentas no es exigible + aplazado, o el
+  # calendario de Eli esta mal cargado o hay facturas fuera de alcance.
+  cuentas_clientes: ["430", "431", "432", "435", "436"]
   tolerancia_eur: 1000        # diferencia aceptable en el check mensual
   incluir_polizas: false      # el check se hace sobre saldo sin polizas
 

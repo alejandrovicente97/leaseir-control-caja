@@ -114,6 +114,7 @@ COLS_DOC = ["id", "num", "tercero", "cuenta", "fecha", "vencimiento", "total",
             "mes_venc", "mes_factura", "tipologia"]
 COLS_REAL = ["fecha", "mes", "sentido", "tercero", "num", "doc_id", "importe",
              "banco", "concepto", "conciliado"]
+COLS_PLAN = ["numero", "nombre", "grupo", "debe", "haber", "saldo"]
 COLS_BANCO = ["cuenta", "saldo", "tipo", "limite"]
 COLS_MOV = ["cuenta", "fecha", "importe", "concepto"]
 
@@ -334,6 +335,22 @@ def desde_holded(ruta: Path) -> dict:
                                "status", defecto=""),
         })
 
+    # ---- plan contable ----------------------------------------------------
+    plan = []
+    for c in d.get("plan_contable", []) or []:
+        if not isinstance(c, dict):
+            continue
+        plan.append({
+            "numero": str(_pri(c, "number", "num", "code", defecto="")),
+            "nombre": _pri(c, "name", "description", defecto=""),
+            "grupo":  _pri(c, "group", defecto=""),
+            # Holded manda los importes como cadena decimal, a proposito, para
+            # no perder precision. num() los convierte respetando el formato.
+            "debe":   num(_pri(c, "debit", "debe", defecto=0)),
+            "haber":  num(_pri(c, "credit", "haber", defecto=0)),
+            "saldo":  num(_pri(c, "balance", "saldo", defecto=0)),
+        })
+
     movs = []
     for m in d.get("movimientos_tesoreria", []) or []:
         if not isinstance(m, dict):
@@ -354,6 +371,7 @@ def desde_holded(ruta: Path) -> dict:
         "bancos": pd.DataFrame(bancos, columns=COLS_BANCO),
         "movimientos": pd.DataFrame(movs, columns=COLS_MOV),
         "realizados": pd.DataFrame(realizados, columns=COLS_REAL),
+        "plan_contable": pd.DataFrame(plan, columns=COLS_PLAN),
         "origen": f"API de Holded ({sello})",
         "avisos_origen": meta.get("avisos", []),
     }
@@ -431,6 +449,7 @@ def desde_excel(f_cobros: Path, f_forecast: Path) -> dict:
         # el Excel no lleva libro de liquidaciones: el ejecutado por factura
         # solo existe con la API. Vacio PERO CON COLUMNAS.
         "realizados": pd.DataFrame(columns=COLS_REAL),
+        "plan_contable": pd.DataFrame(columns=COLS_PLAN),
         "origen": f"Excel {f_forecast.name}",
     }
 

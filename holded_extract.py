@@ -65,9 +65,17 @@ RECURSOS_V2 = {
     # y un aviso de "bloque vacio" que parecia un fallo y no lo era.
     "contactos":       (["contacts"], False),
     "pagos":           (["payments"], False),
-    # el libro diario no se pide: nadie lo consume y gastaba cuatro 404 por
-    # ejecucion. Si algun dia hace falta para el cuadre, la ruta documentada es
-    # "Listado de asientos contables" en el bloque de CONTABILIDAD.
+    # Plan contable con debe, haber y saldo por cuenta. Es lo que permite
+    # cuadrar el pendiente de cobro contra contabilidad: el saldo de las 430*
+    # tiene que ser lo exigible hoy mas lo aplazado segun el calendario.
+    "plan_contable":   (["accounting-accounts"], False),
+    # Libro diario. La ruta buena es /ledger-entries: antes se probaban nombres
+    # inventados (accounting/entries, dailyledger...) y volvia vacio, que no es
+    # lo mismo que no existir. Es la fuente mas completa de cobros y pagos
+    # ejecutados: cada apunte lleva cuenta contable, fecha y debe/haber, asi que
+    # el ejecutado del mes se puede cuadrar contra contabilidad y no solo
+    # contra lo que /payments haya conciliado.
+    "libro_diario":    (["ledger-entries"], False),
 }
 RECURSOS_V1 = {
     "facturas_venta":  ([f"{BASE_V1}/documents/invoice"], True),

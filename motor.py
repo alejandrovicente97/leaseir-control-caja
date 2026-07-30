@@ -344,6 +344,51 @@ class MotorCaja:
     # =======================================================================
     #  FORECAST CONSOLIDADO
     # =======================================================================
+    #  CUADRE CONTRA CONTABILIDAD
+    # =======================================================================
+    def check_clientes(self) -> dict | None:
+        """
+        El saldo contable de las 430* contra el pendiente de las facturas.
+
+        Es el mejor check que hay del lado de cobros, porque cierra contra
+        contabilidad y no contra otro calculo mio. La igualdad no es con el
+        "pendiente exigible" del panel, y ahi esta la gracia:
+
+            saldo 430*  =  exigible hoy  +  aplazado segun calendario de Eli
+
+        Contabilidad lleva la factura entera mientras no se cobre. El panel
+        solo llama exigible a la parte cuyas cuotas ya han vencido. La
+        diferencia entre las dos cifras ES lo financiado/aplazado, no un error:
+        si ese puente cuadra, el calendario de Eli esta bien cargado.
+        """
+        plan = self.d.get("plan_contable")
+        if plan is None or plan.empty:
+            return None
+        pref = tuple(str(p) for p in
+                     (self.cfg.get("cuadre") or {}).get("cuentas_clientes") or ["430"])
+        cta = plan[plan["numero"].astype(str).str.startswith(pref)]
+        if cta.empty:
+            return None
+
+        v = self.cobros_por_factura()
+        if v.empty:
+            return None
+        exigible = float(v["pendiente_cobro"].sum())
+        aplazado = float((v["total"] - v["teorico_hoy"]).sum())
+        contable = float(cta["saldo"].sum())
+        tol = float((self.cfg.get("cuadre") or {}).get("tolerancia", 1000))
+        dif = contable - (exigible + aplazado)
+        return {
+            "cuentas": [{"numero": r["numero"], "nombre": r["nombre"],
+                         "saldo": float(r["saldo"])}
+                        for _, r in cta.sort_values("numero").iterrows()],
+            "contable": contable, "exigible": exigible, "aplazado": aplazado,
+            "suma": exigible + aplazado, "diferencia": dif,
+            "cuadra": abs(dif) <= tol, "tolerancia": tol,
+            "prefijos": list(pref),
+        }
+
+    # =======================================================================
     #  LO QUE YA HA PASADO ESTE MES
     # =======================================================================
     def ya_pagado_fijos(self) -> dict:

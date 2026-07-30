@@ -547,6 +547,37 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                          sorted(f_fij_det), alineacion=["", "", "", "r"])
                    if f_fij_det else "")
 
+    # ---- check contra contabilidad (430*) ---------------------------------
+    ck = meta.get("check_clientes")
+    if ck:
+        f_ck = [["Saldo contable de las cuentas " + ", ".join(ck["prefijos"]) + "*",
+                 eur(ck["contable"])],
+                ["Exigible hoy (pendiente de cobro del panel)", eur(ck["exigible"])],
+                ["Aplazado: cuotas que aún no han vencido", eur(ck["aplazado"])],
+                ["Exigible + aplazado", f'<b>{eur(ck["suma"])}</b>'],
+                ["Diferencia",
+                 f'<span class="{"" if ck["cuadra"] else "neg"}">{eur(ck["diferencia"])}</span>']]
+        cls_ck = ["", "", "", "sub", "total"]
+        nota = ("cuadra" if ck["cuadra"] else
+                f'no cuadra por {eur(abs(ck["diferencia"]))}')
+        t_check = (f'<div class="nota-cuadre {"ok" if ck["cuadra"] else "mal"}">'
+                   f'<b>{esc(nota.upper())}</b> — contabilidad lleva la factura entera '
+                   f'mientras no se cobre; el panel solo llama exigible a la parte '
+                   f'ya vencida según el calendario de Eli. La diferencia entre las '
+                   f'dos cifras <em>es</em> lo aplazado, no un error '
+                   f'(tolerancia {eur(ck["tolerancia"])}).</div>'
+                   + tabla(["Concepto", "Importe"], f_ck,
+                           alineacion=["", "r"], clases=cls_ck))
+        det_ck = tabla(["Cuenta", "Nombre", "Saldo"],
+                       [[esc(c["numero"]), esc(c["nombre"]), eur(c["saldo"])]
+                        for c in ck["cuentas"]], alineacion=["", "", "r"])
+        t_check += (f'<details><summary>Desglose por cuenta contable</summary>'
+                    f'{det_ck}</details>')
+    else:
+        t_check = ('<p class="vacio">Sin plan contable. Requiere el permiso '
+                   '<code>accounting:chart-of-accounts.read</code> en el token '
+                   'de Holded.</p>')
+
     # ---- avisos de calidad del dato ---------------------------------------
     dq = meta.get("calidad", [])
     dq_html = ("<ul class='dq'>" + "".join(f"<li>{d}</li>" for d in dq) + "</ul>") \
@@ -806,8 +837,8 @@ summary{{cursor:pointer;font-size:13px;color:{P['ink2']};font-weight:600;padding
 .buscador input:focus{{outline:2px solid {P['brand3']};outline-offset:-1px}}
 .detalles{{border-top:1px solid {P['grid']}}}
 details.terc{{border-bottom:1px solid {P['grid']};margin:0}}
-details.terc>summary{{display:flex;align-items:center;gap:14px;padding:11px 6px;
- cursor:pointer;font-size:14px;list-style:none}}
+details.terc>summary{{display:flex;align-items:center;gap:12px;padding:7px 6px;
+ cursor:pointer;font-size:12.5px;list-style:none}}
 details.terc>summary::-webkit-details-marker{{display:none}}
 details.terc>summary::before{{content:"▸";color:{P['muted']};font-size:11px;
  width:12px;flex:none;transition:transform .12s}}
@@ -815,10 +846,12 @@ details.terc[open]>summary::before{{transform:rotate(90deg)}}
 details.terc>summary:hover{{background:#f7f9fa}}
 details.terc[open]>summary{{background:#f1f4f5;font-weight:600}}
 .t-nom{{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.t-res{{color:{P['ink2']};font-size:13px;white-space:nowrap;font-variant-numeric:tabular-nums}}
-.t-n{{color:{P['muted']};font-size:12px;width:64px;text-align:right;flex:none}}
-.t-body{{padding:4px 6px 16px;overflow-x:auto}}
-.t-body table{{font-size:12.5px}}
+.t-res{{color:{P['ink2']};font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}}
+.t-n{{color:{P['muted']};font-size:11px;width:58px;text-align:right;flex:none}}
+.t-body{{padding:2px 6px 12px;overflow-x:auto}}
+.t-body table{{font-size:11.5px}}
+.t-body td{{padding:4px 8px}}
+.t-body th{{padding:5px 8px}}
 .rojo{{color:{P['crit']}}}
 .pie{{margin:30px -20px -72px;padding:20px;background:{P['brand']};color:#a9c4ce;
  font-size:11.5px;line-height:1.65;display:flex;justify-content:space-between;
@@ -934,6 +967,13 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
       <input type="text" id="bc" placeholder="Filtrar cliente…" oninput="filtrar('p2c', this.value)">
     </div>
     <div id="p2c" class="detalles">{det_cobros}</div>
+  </section>
+
+  <section>
+    <h2>Check contra contabilidad: cuentas de clientes</h2>
+    <p class="h2n">El puente entre lo que dice el mayor y lo que dice el panel.
+     Si cuadra, el calendario de Eli está bien cargado.</p>
+    {t_check}
   </section>
 
   <section>
