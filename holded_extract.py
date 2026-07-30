@@ -66,34 +66,61 @@ class Holded:
         self.auth_mode = None
 
     # -- autenticacion -------------------------------------------------------
+    # Holded ha cambiado de formato de token con el tiempo y no todas las
+    # variantes usan la misma cabecera. Un 400 no significa token invalido:
+    # significa peticion mal formada, normalmente por mandar Content-Type en
+    # un GET o un parametro que ese endpoint no acepta. Se prueban todas y se
+    # deja constancia de lo que responde Holded en cada caso.
+    MODOS = [
+        ("key",            {"key": "{k}"},                        True),
+        ("key-sin-ct",     {"key": "{k}"},                        False),
+        ("bearer",         {"Authorization": "Bearer {k}"},       True),
+        ("bearer-sin-ct",  {"Authorization": "Bearer {k}"},       False),
+        ("x-api-key",      {"X-API-KEY": "{k}"},                  False),
+        ("x-auth-token",   {"X-AUTH-TOKEN": "{k}"},               False),
+    ]
+
     def _headers(self, mode: str) -> dict:
-        h = {"Accept": "application/json", "Content-Type": "application/json"}
-        if mode == "key":
-            h["key"] = self.key
-        else:
-            h["Authorization"] = f"Bearer {self.key}"
-        return h
+        for nombre, plantilla, con_ct in self.MODOS:
+            if nombre == mode:
+                h = {"Accept": "application/json"}
+                if con_ct:
+                    h["Content-Type"] = "application/json"
+                for cab, val in plantilla.items():
+                    h[cab] = val.format(k=self.key)
+                return h
+        return {"Accept": "application/json", "key": self.key}
 
     def _detect_auth(self) -> str:
-        """Holded acepta 'key: X' (tokens clasicos) o Bearer (tokens pat_...)."""
         if self.auth_mode:
             return self.auth_mode
-        candidatos = ["bearer", "key"] if self.key.startswith("pat_") else ["key", "bearer"]
-        for mode in candidatos:
-            try:
-                r = self.s.get(f"{BASE_INVOICING}/contacts",
-                               headers=self._headers(mode),
-                               params={"page": 1}, timeout=TIMEOUT)
-            except requests.RequestException as e:
-                raise SystemExit(f"No hay conexion con api.holded.com: {e}")
-            if r.status_code == 200:
-                self.auth_mode = mode
-                print(f"  [ok] Autenticacion valida via '{mode}'")
-                return mode
+
+        print("  Probando formas de autenticacion contra Holded...")
+        ultimo = None
+        for nombre, _, _ in self.MODOS:
+            for params in ({}, {"page": 1}):
+                try:
+                    r = self.s.get(f"{BASE_INVOICING}/contacts",
+                                   headers=self._headers(nombre),
+                                   params=params, timeout=TIMEOUT)
+                except requests.RequestException as e:
+                    raise SystemExit(f"No hay conexion con api.holded.com: {e}")
+                etiqueta = f"{nombre}{' +page' if params else ''}"
+                print(f"    {etiqueta:20s} HTTP {r.status_code}  {r.text[:120].strip()}")
+                ultimo = r
+                if r.status_code == 200:
+                    self.auth_mode = nombre
+                    self.params_extra = params
+                    print(f"  [ok] Funciona con '{nombre}'")
+                    return nombre
+                time.sleep(0.2)
+
         raise SystemExit(
-            f"La API key no es valida (ultimo codigo HTTP {r.status_code}).\n"
-            "Revisa en Holded: Ajustes > Desarrolladores > Credenciales, y que el\n"
-            "token tenga permisos de lectura sobre Facturacion, Contactos y Tesoreria."
+            f"Ninguna forma de autenticacion ha funcionado (ultimo HTTP {ultimo.status_code}).\n"
+            f"Respuesta de Holded: {ultimo.text[:400]}\n\n"
+            "Arriba esta el detalle de cada intento. Un 400 apunta a formato de\n"
+            "peticion; un 401 o 403, a permisos del token en\n"
+            "Holded > Ajustes > Desarrolladores > Credenciales."
         )
 
     # -- peticiones ----------------------------------------------------------
