@@ -39,6 +39,9 @@ BASE_V1_CONTA = "https://api.holded.com/api/accounting/v1"
 TIMEOUT = 60
 PAUSA = 0.25
 LIMITE = 100
+# 2.000 paginas x 100 = 200.000 registros. El libro diario de cuatro anos a
+# nivel de linea pasa de largo de las 400 que habia antes.
+TOPE_PAGINAS = 2000
 
 
 def ts(d: date) -> int:
@@ -243,8 +246,13 @@ class Holded:
                         self.truncados[url] = len(salida)
                 break
             time.sleep(PAUSA)
-            if vueltas > 400:
-                self._log("    [aviso] corte de seguridad a 400 paginas")
+            if vueltas > TOPE_PAGINAS:
+                # Esto ya no es una red de seguridad, es una descarga
+                # incompleta. Se anota como truncada para que se vea en el
+                # diagnostico en vez de pasar por un total bueno.
+                self.truncados[url] = len(salida)
+                self._log(f"    [TRUNCADA] corte de seguridad a {TOPE_PAGINAS} "
+                          f"paginas con {len(salida)} registros")
                 break
         return salida
 

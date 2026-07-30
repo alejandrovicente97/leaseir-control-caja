@@ -80,9 +80,18 @@ RECURSOS_V2 = {
 }
 
 # Parametros propios de algun recurso, aparte de la ventana general.
+# El libro diario va a nivel de LINEA de asiento: cuatro anos son cientos de
+# miles de registros y una extraccion de diez minutos para un trabajo que se
+# lanza todos los dias. Para lo que se usa -ejecutado del mes, naturaleza de la
+# caja y cuadre contra contabilidad- sobra con el ejercicio en curso y el
+# anterior. Se puede ampliar con LEASEIR_ANOS_DIARIO.
+ANOS_DIARIO = int(os.environ.get("LEASEIR_ANOS_DIARIO", "1"))
+
 PARAMS_V2 = {
-    "libro_diario": lambda desde, hasta: {"start_date": str(desde),
-                                          "end_date": str(hasta)},
+    "libro_diario": lambda desde, hasta: {
+        "start_date": str(max(desde, date(date.today().year - ANOS_DIARIO, 1, 1))),
+        "end_date": str(min(hasta, date(date.today().year, 12, 31))),
+    },
 }
 RECURSOS_V1 = {
     "facturas_venta":  ([f"{BASE_V1}/documents/invoice"], True),
