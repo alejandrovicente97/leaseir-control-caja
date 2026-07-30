@@ -149,6 +149,7 @@ def main() -> None:
             "check_clientes": m.check_clientes(),
             "ocultar_saldo_cero": (cfg.get("tesoreria") or {}).get(
                 "ocultar_saldo_cero", True),
+            "aviso_limites": (cfg.get("tesoreria") or {}).get("aviso_limites"),
             "problemas_graves": graves,
             "contraste": cfg.get("contraste_excel") or {},
             "cuadre_proyeccion": m.cuadre_proyeccion(fc),

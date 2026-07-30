@@ -149,8 +149,18 @@ pagos:
 #
 # El nombre se compara por fragmento, sin acentos ni mayusculas.
 tesoreria:
+  # Limites tomados de tu "Monthly FCF - Bottom Up - v2", hoja Polizas y filas
+  # 57-59 de FCF (2026). El 6575 es el que aparece en Holded. El 9418 se deja
+  # preparado por si tambien esta dado de alta ahi con otro nombre.
+  # CONFIRMA los limites: la hoja Polizas es de noviembre de 2024 y las
+  # operaciones vencian en 2025, asi que estaran renovadas.
   polizas:
-    - { cuenta: "CUENTA CREDITO NEGOCIO SANTANDER", limite: 0 }   # <-- poner el limite real
+    - { cuenta: "6575", limite: 200000 }    # ES1100496735182216276575, LT
+    - { cuenta: "9418", limite: 400000 }    # ES9200496735162416279418, LT
+    # La de 600.000 (ES2800496735152516277628) es de LML, no de LT: fuera.
+  # Se avisa en el panel de que el limite viene de una hoja, no de Holded:
+  # Holded no publica limites de credito.
+  aviso_limites: "Límites tomados de tu bottom-up (hoja Pólizas, nov-2024). Confírmalos: las operaciones vencían en 2025."
   # Las cuentas y tarjetas a cero no se listan en el dashboard: son ruido.
   # Ponlo en false si prefieres verlas todas.
   ocultar_saldo_cero: true

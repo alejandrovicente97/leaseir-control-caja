@@ -290,7 +290,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # saberlo.
     sin_lim = fc.get("polizas_sin_limite") or []
     if fc.get("polizas_limite"):
-        nota_pol = f"+ {eur(fc['polizas_disponible'])} disponible en pólizas"
+        nota_pol = (f"+ {eur(fc['polizas_disponible'])} disponible en pólizas "
+                    f"sobre {eur(fc['polizas_limite'])} de límite")
     elif sin_lim:
         nota_pol = f"pólizas: {esc(', '.join(sin_lim))}, límite sin configurar"
     else:
@@ -479,6 +480,11 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                for _, r in vis.iterrows()]
         t_ban = tabla(["Cuenta", "Tipo", "Saldo"], f_b) if f_b else \
             '<p class="vacio">Todas las cuentas a cero.</p>'
+        av = meta.get("aviso_limites")
+        if av:
+            # Holded no publica limites de credito: el disponible sale de un
+            # numero escrito a mano. Decir de donde viene es parte del dato.
+            t_ban += f'<p class="vacio">{esc(av)}</p>'
         if n_cero:
             t_ban += (f'<p class="vacio">{n_cero} cuenta{"s" if n_cero != 1 else ""} '
                       f'a cero no se muestra{"n" if n_cero != 1 else ""}.</p>')
