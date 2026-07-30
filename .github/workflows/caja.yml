@@ -49,7 +49,8 @@ jobs:
           if [ -z "$HOLDED_API_KEY" ]; then
             echo "::error::Falta el secret HOLDED_API_KEY"; exit 1
           fi
-          python holded_extract.py --anos 4 --destino datos/
+          python holded_extract.py --anos 4 --destino datos/ \
+                                   --diagnostico diagnostico/holded.json
 
       # El Sheet de Eli esta compartido como "cualquiera con el enlace puede ver",
       # asi que se baja con una URL normal. No hace falta cuenta de servicio ni
@@ -85,6 +86,9 @@ jobs:
           # GitHub Pages sirve desde la raiz de main
           cp publicado/index.html index.html
           git add -f publicado/index.html historico/ index.html
+          # esquema, rutas y conteos de la API: sin datos de negocio, sirve para
+          # diagnosticar la extraccion sin depender del log de Actions
+          git add -f diagnostico/holded.json || true
           git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
           git push
 
