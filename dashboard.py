@@ -600,6 +600,118 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                    '<code>accounting:chart-of-accounts.read</code> en el token '
                    'de Holded.</p>')
 
+    # ---- composicion de cada linea del forecast ---------------------------
+    # El cuadro de arriba da los totales; aqui se abre cada linea y se ve de
+    # que se compone, mes a mes. Sin esto hay que creerse un numero agregado.
+    def _fila_meses(nombre, valores, negrita=False):
+        cel = [f'<span class="{"neg" if v < 0 else ""}">{eur(v)}</span>'
+               for v in valores]
+        n = f"<b>{esc(nombre)}</b>" if negrita else esc(nombre)
+        return [n] + cel
+
+    def _desglose(titulo, filas, nota=""):
+        if not filas:
+            return ""
+        tot = [sum(f[1][i] for f in filas) for i in range(len(meses))]
+        cuerpo = [_fila_meses(n, v) for n, v in filas]
+        cuerpo.append(_fila_meses("Total", tot, True))
+        cl = [""] * (len(cuerpo) - 1) + ["sub"]
+        return (f'<details><summary>{esc(titulo)}</summary>'
+                + (f'<p class="h2n">{esc(nota)}</p>' if nota else "")
+                + tabla(["Concepto"] + etiquetas, cuerpo,
+                        alineacion=[""] + ["r"] * len(meses), clases=cl)
+                + '</details>')
+
+    des = []
+
+    if not cli.empty:
+        top = cli.reindex(cli[[f"teorico_{m}" for m in meses]].abs().sum(axis=1)
+                          .sort_values(ascending=False).index).head(25)
+        des.append(_desglose(
+            f"Cobro de clientes — {len(cli)} cliente{'s' if len(cli) != 1 else ''}, se listan los 25 mayores",
+            [(r["cliente"], [float(r[f"teorico_{m}"]) for m in meses])
+             for _, r in top.iterrows()],
+            "El resto está en la pestaña de Cobros, factura a factura."))
+
+    rent = fc.get("rentings")
+    if rent is not None and not rent.empty:
+        for tipo, etiq in [("renting", "Rentings sin facturar"),
+                           ("fusion", "Ventas financiadas desde LML (fusión)")]:
+            g = rent[rent["tipo"] == tipo] if "tipo" in rent.columns else rent
+            if g.empty:
+                continue
+            porcli = {}
+            for _, r in g.iterrows():
+                porcli.setdefault(r["cliente"], [0.0] * len(meses))
+                if r["mes"] in meses:
+                    porcli[r["cliente"]][meses.index(r["mes"])] += float(r["importe"])
+            des.append(_desglose(f"{etiq} — por cliente",
+                                 sorted(porcli.items(), key=lambda x: -sum(x[1]))))
+
+    sf = (fc.get("detalle") or {}).get("sin_facturar") or []
+    if sf:
+        des.append(_desglose(
+            "Ventas comprometidas sin facturar",
+            [(f'{x["concepto"]} · {x["unidades"]} x {eur(x["precio"])} '
+              f'+ {x["iva"]:.0%} IVA',
+              [x["unidades"] * x["precio"] * (1 + x["iva"])] + [0.0] * (len(meses) - 1))
+             for x in sf],
+            "Solo cuentan en el mes en curso: es un compromiso, no un calendario."))
+
+    aj = (fc.get("detalle") or {}).get("ajustes") or []
+    if aj:
+        des.append(_desglose(
+            "Ajustes sobre cobros",
+            [(x["concepto"], [float(x["importe"])] + [0.0] * (len(meses) - 1))
+             for x in aj],
+            "Criterio manual de config.yaml, no sale de Holded."))
+
+    if not prov.empty:
+        topp = prov.reindex(prov[[f"pago_{m}" for m in meses]].abs().sum(axis=1)
+                            .sort_values(ascending=False).index).head(25)
+        des.append(_desglose(
+            f"Pago a proveedores — {len(prov)} proveedor{'es' if len(prov) != 1 else ''}, se listan los 25 mayores",
+            [(r["proveedor"], [-abs(float(r[f"pago_{m}"])) for m in meses])
+             for _, r in topp.iterrows()],
+            "El mes en curso arrastra todo lo vencido. El resto está en la "
+            "pestaña de Pagos."))
+
+    recu = fc.get("recurrentes")
+    if recu is not None and not recu.empty:
+        col = "etiqueta" if "etiqueta" in recu.columns else recu.columns[0]
+        porprov = {}
+        for _, r in recu.iterrows():
+            porprov.setdefault(r[col], [0.0] * len(meses))
+            if r["mes"] in meses:
+                porprov[r[col]][meses.index(r["mes"])] += float(r["proyectado"])
+        des.append(_desglose(
+            "Gastos recurrentes proyectados — por proveedor",
+            sorted(porprov.items(), key=lambda x: sum(x[1])),
+            "Solo se proyecta el mes que NO tiene factura en Holded: nunca se "
+            "duplica con una factura real."))
+
+    det = fc.get("detalle") or {}
+    pag_fij = (det.get("fijos_pagados") or {})
+    for clave, titulo in [("salarios", "Salarios y Seguridad Social"),
+                          ("cuotas_sl", "Cuotas S&L y renting bancario"),
+                          ("otros_fijos", "Otros pagos fijos")]:
+        d0 = det.get(clave) or []
+        if not d0:
+            continue
+        filas = [(x["concepto"], [float(x["importe"])] * len(meses)) for x in d0]
+        hecho = float(pag_fij.get(clave, 0) or 0)
+        if hecho:
+            filas.append((f"Ya pagado en {m0['etiqueta']}",
+                          [hecho] + [0.0] * (len(meses) - 1)))
+        des.append(_desglose(
+            f"{titulo} — composición mensual", filas,
+            "No están en Holded: salen de config.yaml. En el mes en curso se "
+            "descuenta lo ya pagado según el extracto." if hecho else
+            "No están en Holded: salen de config.yaml."))
+
+    t_desglose = ("".join(des) if des else
+                  '<p class="vacio">Sin detalle disponible.</p>')
+
     # ---- caja del mes por naturaleza contable -----------------------------
     cn = meta.get("caja_naturaleza")
     if cn is not None and not cn.empty:
@@ -1012,6 +1124,13 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
      recurrentes) se proyectan aparte.</p>
     {tabla_fc}
     <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
+  </section>
+
+  <section>
+    <h2>De qué se compone cada línea</h2>
+    <p class="h2n">Los mismos importes del cuadro de arriba, abiertos. Cada
+     bloque suma exactamente la línea que le corresponde.</p>
+    {t_desglose}
   </section>
 
   <section>
