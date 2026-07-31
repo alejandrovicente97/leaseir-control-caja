@@ -14,6 +14,7 @@ import calendar as _callib
 import html
 import json
 import os
+import re
 
 from fuentes import nombre_mes
 from datetime import date, datetime, timezone
@@ -268,6 +269,126 @@ def detalle_desplegable(grupos, cabeceras, alineacion=None, vacio="Sin movimient
 # ---------------------------------------------------------------------------
 #  DASHBOARD
 # ---------------------------------------------------------------------------
+# JS del boton de actualizar. String normal, NO f-string: lleva llaves de
+# JavaScript por todas partes y doblarlas todas seria un campo de minas.
+# __API__ y __WFURL__ se sustituyen al construir la pagina.
+JS_ACTUALIZAR = r"""
+var API_WF = "__API__";
+var API_REPO = API_WF.replace(/\/actions\/workflows\/.*$/, "");
+var WF_URL = "__WFURL__";
+var pollTimer = null;
+
+function tokenGH() { try { return localStorage.getItem("lsr_gh_token") || ""; } catch (e) { return ""; } }
+function cab(tok) {
+  return { "Authorization": "Bearer " + tok,
+           "Accept": "application/vnd.github+json",
+           "X-GitHub-Api-Version": "2022-11-28" };
+}
+function estado(txt, spin) {
+  var e = document.getElementById("refEstado");
+  if (e) e.innerHTML = (spin ? '<span class="spin"></span>' : '') + txt;
+}
+function abrirConf() { var c = document.getElementById("refConf"); if (c) c.hidden = false; }
+function cerrarConf() { var c = document.getElementById("refConf"); if (c) c.hidden = true; }
+function guardarToken() {
+  var v = (document.getElementById("refTok").value || "").trim();
+  if (!v) return;
+  try { localStorage.setItem("lsr_gh_token", v); } catch (e) {}
+  document.getElementById("refTok").value = "";
+  cerrarConf();
+  forzar();
+}
+function borrarToken() {
+  try { localStorage.removeItem("lsr_gh_token"); } catch (e) {}
+  estado("llave quitada de este navegador", false);
+}
+function errorLlave(codigo) {
+  estado("la llave no vale (HTTP " + codigo + "): caducada o sin permiso de Actions sobre el repo. " +
+         '<a href="#" onclick="abrirConf();return false">cambiar llave</a> · ' +
+         '<a href="' + WF_URL + '" target="_blank" rel="noopener">lanzar desde GitHub</a>', false);
+  var b = document.getElementById("btnRef"); if (b) b.disabled = false;
+}
+function forzar() {
+  var tok = tokenGH();
+  if (!tok) { abrirConf(); return; }
+  var b = document.getElementById("btnRef"); if (b) b.disabled = true;
+  estado("lanzando la actualización…", true);
+  fetch(API_WF + "/dispatches", {
+    method: "POST", headers: cab(tok),
+    body: JSON.stringify({ ref: "main" })
+  }).then(function (r) {
+    if (r.status === 204) { setTimeout(function () { buscarRun(tok, 0); }, 5000); }
+    else if (r.status === 401 || r.status === 403 || r.status === 404) { errorLlave(r.status); }
+    else { estado("GitHub ha contestado HTTP " + r.status + "; reintenta en un momento", false); if (b) b.disabled = false; }
+  }).catch(function () {
+    estado("sin conexión con la API de GitHub; reintenta", false); if (b) b.disabled = false;
+  });
+}
+function buscarRun(tok, intento) {
+  fetch(API_WF + "/runs?per_page=1&event=workflow_dispatch", { headers: cab(tok) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var run = d.workflow_runs && d.workflow_runs[0];
+      var reciente = run && (Date.now() - new Date(run.created_at).getTime()) < 120000;
+      if (run && reciente) {
+        try { localStorage.setItem("lsr_run", JSON.stringify({ id: run.id, t0: Date.now() })); } catch (e) {}
+        poll(run.id, Date.now());
+      } else if (intento < 4) {
+        setTimeout(function () { buscarRun(tok, intento + 1); }, 4000);
+      } else {
+        estado('lanzado, pero no encuentro el run; míralo <a href="' + WF_URL +
+               '" target="_blank" rel="noopener">en GitHub</a>', false);
+        var b = document.getElementById("btnRef"); if (b) b.disabled = false;
+      }
+    });
+}
+function minutos(t0) {
+  var s = Math.floor((Date.now() - t0) / 1000);
+  return Math.floor(s / 60) + "m " + ("0" + (s % 60)).slice(-2) + "s";
+}
+function poll(id, t0) {
+  var tok = tokenGH(); if (!tok) return;
+  if (pollTimer) clearTimeout(pollTimer);
+  fetch(API_REPO + "/actions/runs/" + id, { headers: cab(tok) })
+    .then(function (r) {
+      if (r.status === 401 || r.status === 403) { errorLlave(r.status); return null; }
+      return r.json();
+    })
+    .then(function (d) {
+      if (!d) return;
+      if (d.status === "completed") {
+        try { localStorage.removeItem("lsr_run"); } catch (e) {}
+        if (d.conclusion === "success") {
+          estado("hecho: publicando la página… (≈1 min)", true);
+          setTimeout(function () {
+            location.replace(location.pathname + "?v=" + Date.now());
+          }, 75000);
+        } else {
+          estado('la actualización ha fallado (' + (d.conclusion || "?") + '): ' +
+                 '<a href="' + d.html_url + '" target="_blank" rel="noopener">ver el porqué</a>', false);
+          var b = document.getElementById("btnRef"); if (b) b.disabled = false;
+        }
+      } else {
+        var fase = d.status === "queued" ? "en cola en GitHub" : "leyendo Holded y recalculando";
+        estado(fase + "… " + minutos(t0) + " <span class=\"apagado\">(suele tardar 8-9 min)</span>", true);
+        pollTimer = setTimeout(function () { poll(id, t0); }, 12000);
+      }
+    })
+    .catch(function () { pollTimer = setTimeout(function () { poll(id, t0); }, 20000); });
+}
+(function () {
+  var g;
+  try { g = JSON.parse(localStorage.getItem("lsr_run") || "null"); } catch (e) { g = null; }
+  if (g && Date.now() - g.t0 < 20 * 60000) {
+    var b = document.getElementById("btnRef"); if (b) b.disabled = true;
+    poll(g.id, g.t0);
+  } else if (g) {
+    try { localStorage.removeItem("lsr_run"); } catch (e) {}
+  }
+})();
+"""
+
+
 def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     L, meses = fc["lineas"], fc["meses"]
     m0 = L[meses[0]]
@@ -1554,6 +1675,61 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         "https://github.com/alejandrovicente97/leaseir-control-caja"
         "/actions/workflows/caja.yml")
 
+    # ---- actualizar sin salir del panel -----------------------------------
+    # El boton lanza el workflow directamente contra la API de GitHub y va
+    # contando el estado hasta recargar solo. La pieza delicada es la llave:
+    # una pagina publica NO puede llevar el token dentro -seria regalarlo a
+    # cualquiera que abra el HTML-, asi que el token vive unicamente en el
+    # navegador de Alejandro (localStorage). La primera vez el panel se lo
+    # pide; el lo crea en GitHub con el permiso minimo (Actions: write sobre
+    # este repo y nada mas: no puede tocar codigo) y lo pega. Nunca viaja al
+    # repo ni a la pagina publicada.
+    m_wf = re.match(r"https://github\.com/([^/]+)/([^/]+)/actions/workflows/(.+)$",
+                    url_workflow or "")
+    js_actualizar = ""
+    btn_actualizar = (f'<a class="btn-refresh" href="{url_workflow}" '
+                      f'target="_blank" rel="noopener">⟳ Forzar actualización</a>')
+    if m_wf:
+        api_wf = (f"https://api.github.com/repos/{m_wf.group(1)}/{m_wf.group(2)}"
+                  f"/actions/workflows/{m_wf.group(3)}")
+        btn_actualizar = (
+            '<button class="btn-refresh" id="btnRef" onclick="forzar()" '
+            'title="Lanza la extracción de Holded y recarga el panel al terminar">'
+            '⟳ Actualizar</button>'
+            '<span id="refEstado" class="ref-estado"></span>')
+        panel_token = f'''
+<div id="refConf" class="ref-conf" hidden>
+  <b>Un paso, solo la primera vez.</b>
+  <p>Para que este botón funcione sin pasar por GitHub hace falta una llave.
+  No puede ir dentro de la página —esto es una web pública y sería regalarla—,
+  así que se guarda <b>solo en este navegador</b>.</p>
+  <ol>
+    <li><a href="https://github.com/settings/personal-access-tokens/new"
+      target="_blank" rel="noopener">Crea el token aquí</a> (fine-grained):
+      <b>Repository access → Only select repositories →
+      {esc(m_wf.group(2))}</b>, y en Permissions
+      <b>Actions → Read and write</b>. Nada más: esa llave no puede tocar
+      el código, solo lanzar actualizaciones.</li>
+    <li>Pégalo y guarda:</li>
+  </ol>
+  <div class="ref-fila">
+    <input type="password" id="refTok" placeholder="github_pat_…" autocomplete="off">
+    <button class="btn-mini" onclick="guardarToken()">Guardar</button>
+    <button class="btn-mini" onclick="cerrarConf()">Cancelar</button>
+  </div>
+  <p class="apagado">Alternativa de siempre:
+  <a href="{url_workflow}" target="_blank" rel="noopener">lanzarlo desde GitHub</a>.
+  Si algún día quieres retirar la llave: bórrala en GitHub y aquí con
+  <a href="#" onclick="borrarToken();return false">quitar token de este navegador</a>.</p>
+</div>'''
+        js_actualizar = ('<script>\n'
+                         + JS_ACTUALIZAR
+                         .replace("__API__", api_wf)
+                         .replace("__WFURL__", url_workflow)
+                         + '\n</script>')
+    else:
+        panel_token = ""
+
     # ---- contraste con el Excel ------------------------------------------
     ce = meta.get("contraste") or {}
     if ce.get("activo"):
@@ -1634,6 +1810,22 @@ body{{margin:0;background:{P['plane']};color:{P['ink']};
  padding:4px 13px;border-radius:4px;font-weight:600;font-size:12.5px;
  border:1px solid rgba(255,255,255,.28);transition:background .12s;white-space:nowrap}}
 .btn-refresh:hover{{background:rgba(255,255,255,.26)}}
+button.btn-refresh{{border:0;cursor:pointer;font:inherit}}
+button.btn-refresh:disabled{{opacity:.55;cursor:wait}}
+.ref-estado{{font-size:13px;color:#fff;opacity:.92;display:inline-flex;
+ align-items:center;gap:7px}}
+.ref-estado a{{color:#fff}}
+.spin{{width:12px;height:12px;border:2px solid rgba(255,255,255,.35);
+ border-top-color:#fff;border-radius:50%;display:inline-block;
+ animation:gira .8s linear infinite}}
+@keyframes gira{{to{{transform:rotate(360deg)}}}}
+.ref-conf{{max-width:860px;margin:14px auto 0;padding:16px 20px;background:#fff;
+ border:1px solid #e3b34c;border-radius:11px;font-size:14px}}
+.ref-conf ol{{margin:8px 0 10px 20px;padding:0}}
+.ref-conf li{{margin-bottom:6px}}
+.ref-fila{{display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
+.ref-fila input{{flex:1;min-width:260px;padding:8px 12px;font-size:14px;
+ border:1px solid #ccd4dc;border-radius:7px}}
 h1{{font-size:27px;margin:0 0 4px;letter-spacing:-.4px}}
 h2{{font-size:17px;margin:0 0 4px;letter-spacing:-.2px;color:{P['brand']}}}
 .h2n{{color:{P['muted']};font-size:13px;margin:0 0 14px}}
@@ -1802,11 +1994,11 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   <span>Horizonte <b>{esc(etiquetas[-1])}</b></span>
   <span>Fuente <b>{esc(meta.get('origen', '—'))}</b></span>
   <span>Actualizado <b>{ahora_es():%d/%m/%Y · %H:%M} h</b> <i>(hora peninsular)</i></span>
-  <a class="btn-refresh" href="{url_workflow}" target="_blank" rel="noopener"
-     title="Abre GitHub Actions y lanza el workflow: vuelve a leer Holded y el calendario de Eli">
-     ⟳ Forzar actualización</a>
+  {btn_actualizar}
   {btn_excel}
 </div>
+
+{panel_token}
 
 {banner}
 
@@ -2090,4 +2282,5 @@ function yamlCob() {{
   if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () {{}});
 }}
 </script>
+{js_actualizar}
 </body></html>"""
