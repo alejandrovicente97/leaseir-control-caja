@@ -1428,9 +1428,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     <h2>{esc(mec["etiqueta"])} — ejecutado, pendiente y proyectado</h2>
     <p class="h2n">Como tu hoja «Forecast Caja - Mes en Curso»: lo que ya ha
      pasado por el banco, lo que queda según el forecast, y la suma, que es el
-     mes proyectado de verdad. El ejecutado sale del libro diario; el reparto
-     entre líneas, de los apuntes de liquidación, los patrones de concepto y
-     la contrapartida contable.</p>
+     mes proyectado de verdad. El ejecutado sale del libro diario, repartido
+     por la contrapartida de cada asiento: cada euro está en una sola línea y
+     los bloques suman a la vista.</p>
     <table>
       <thead><tr><th>Concepto</th><th class="r">Ejecutado</th>
       <th class="r">Pendiente</th><th class="r">Mes proyectado</th></tr></thead>
