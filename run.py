@@ -150,6 +150,7 @@ def main() -> None:
     meta = {"origen": datos["origen"], "bancos": datos["bancos"], "calidad": calidad,
             "realizados": m.realizados_mes(),
             "check_clientes": m.check_clientes(),
+            "cobrabilidad": m.cobrabilidad(),
             "caja_naturaleza": m.caja_por_naturaleza(),
             "serie_unlevered": m.serie_unlevered(6),
             "serie_fcf": m.serie_fcf(6),

@@ -188,6 +188,55 @@ class MotorCaja:
 
         return v
 
+    def cobrabilidad(self) -> tuple[pd.DataFrame, dict]:
+        """
+        Que se va a cobrar y que no, con nombre e importe.
+
+        Un forecast que da por cobrado todo lo vencido no es un forecast, es
+        una lista de deseos: hay 1.079.317 euros en retraso y dar por hecho
+        que entran todos este mes proyecta una caja que no va a existir.
+
+        La regla es el retraso, que es el unico dato objetivo que hay:
+
+            al dia o poco vencido  -> entra
+            muy vencido            -> NO entra, y se dice cuanto
+
+        El corte esta en config (cobros.dias_dudoso). No pretende ser una
+        probabilidad de impago: es una linea, dibujada donde tu digas, para
+        que el proyectado se apoye en lo que razonablemente entra. Lo que
+        quede fuera no desaparece, sale listado con su importe para que lo
+        puedas meter tu con previsiones si sabes que ese cliente si paga.
+        """
+        v = self.cobros_por_factura()
+        if v.empty:
+            return pd.DataFrame(), {"entra": 0.0, "fuera": 0.0}
+        cfg = self.cfg.get("cobros") or {}
+        dias = int(cfg.get("dias_dudoso", 90))
+        hoy = date.today()
+
+        d = v[v["pendiente_cobro"] > 0.01].copy()
+        if d.empty:
+            return pd.DataFrame(), {"entra": 0.0, "fuera": 0.0}
+
+        def antiguedad(r):
+            f = r.get("vencimiento") or r.get("fecha")
+            try:
+                return (hoy - f).days
+            except Exception:
+                return 0
+        d["dias"] = d.apply(antiguedad, axis=1)
+        # Lo que esta al dia no es dudoso por mucho que el cliente sea lento:
+        # solo se juzga lo que ya deberia haber entrado.
+        d["entra"] = (d["retraso"] <= 0.01) | (d["dias"] <= dias)
+        d["motivo"] = d.apply(
+            lambda r: "" if r["entra"] else f"vencida hace {int(r['dias'])} dias",
+            axis=1)
+        tot = {"entra": float(d[d["entra"]]["pendiente_cobro"].sum()),
+               "fuera": float(d[~d["entra"]]["pendiente_cobro"].sum()),
+               "dias": dias,
+               "n_fuera": int((~d["entra"]).sum())}
+        return d, tot
+
     def cobros_por_cliente(self) -> pd.DataFrame:
         v = self.cobros_por_factura()
         if v.empty:
@@ -596,8 +645,33 @@ class MotorCaja:
         # si el puente partiera del listado en bruto y el KPI del listado
         # corregido, los 24.705 de la cuenta de Caixa que Holded declara a cero
         # apareceria como flujo del mes en vez de como saldo que ya estaba.
-        hoy_total = self._conciliar_caja()["saldo"]
+        cc = self._conciliar_caja()
+        hoy_total = cc["saldo"]
         variacion = float(del_mes["importe"].sum())
+
+        # EL MISMO PUENTE, CUENTA A CUENTA.
+        # El bottom-up de Alejandro esta montado banco a banco, asi que cuando
+        # el total no coincide lo unico util es poder poner las dos columnas al
+        # lado y ver que linea se separa. Dar solo el total obliga a adivinar
+        # donde estan 200.000 euros de diferencia.
+        saldo_hoy_cta = dict(zip(ban[ban["tipo"] == "cuenta"]["cuenta"],
+                                 ban[ban["tipo"] == "cuenta"]["saldo"]))
+        for c in cc.get("conciliacion") or []:      # la cuenta reconstruida
+            if c.get("rescatada"):
+                saldo_hoy_cta[c["cuenta"]] = c["estimado"]
+        var_cta = del_mes.groupby("cuenta")["importe"].sum().to_dict()
+        post_cta = (m[m["mes"] > mes].groupby("cuenta")["importe"].sum().to_dict()
+                    if not m[m["mes"] > mes].empty else {})
+        por_cuenta = []
+        for cta, hoy in saldo_hoy_cta.items():
+            v = float(var_cta.get(cta, 0.0))
+            fin = float(hoy) - float(post_cta.get(cta, 0.0))
+            if abs(fin) < 0.005 and abs(v) < 0.005:
+                continue
+            por_cuenta.append({"cuenta": cta, "inicio": fin - v,
+                               "hoy": fin, "variacion": v,
+                               "n": int((del_mes["cuenta"] == cta).sum())})
+        por_cuenta.sort(key=lambda x: x["variacion"])
         posterior = float(m[m["mes"] > mes]["importe"].sum())
         saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
 
@@ -721,6 +795,7 @@ class MotorCaja:
             "unlevered": variacion - deuda,
             "detalle_deuda": det_deuda,
             "n_movimientos": int(len(del_mes)),
+            "por_cuenta": por_cuenta,
         }
 
     def unlevered_ejecutado(self, mes: str | None = None) -> dict | None:

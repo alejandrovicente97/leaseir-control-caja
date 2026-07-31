@@ -303,8 +303,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # Tener el grueso de la tesoreria dentro de una cuenta de credito no es
     # indiferente: se cuenta como caja pero se dice.
     if fc.get("saldo_en_polizas", 0) > 0.5:
-        nota_pol += (f" · además {eur(fc['saldo_en_polizas'])} dentro de la "
-                     f"cuenta de crédito, que no cuenta como caja")
+        nota_pol += (f" · {eur(fc['saldo_en_polizas'])} en cuenta de crédito, "
+                     f"fuera de caja")
 
     # si el saldo contable y el listado de tesoreria no dicen lo mismo, se
     # avisa: una cuenta que figura a cero en el listado y tiene dinero dentro
@@ -312,22 +312,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # Cuántas cuentas del listado no tienen saldo pero sí cuenta contable con
     # movimiento: es la forma de que la cuenta de Caixa que falta se anuncie
     # sola en vez de descubrirse restando totales.
-    huecos = [c for c in (fc.get("conciliacion_caja") or [])
-              if c.get("listado") is None and abs(c.get("conta") or 0) > 1]
-    if huecos:
-        nota_pol += (f" · ojo: {len(huecos)} cuenta{'s' if len(huecos) != 1 else ''} "
-                     f"contable{'s' if len(huecos) != 1 else ''} de tesorería "
-                     f"sin cuenta detrás en el listado de Holded")
 
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
-        kpi(f"Levered FCF {m0['etiqueta']} · lo que llevamos",
-            eur(eje.get("levered", eje.get("variacion_caja", 0))),
-            (f"Banco: {eur(eje.get('saldo_inicio', 0))} el día 1 → "
-             f"{eur(eje.get('saldo_hoy', fc['saldo_actual']))} hoy"
-             if eje.get("fuente") == "saldo del banco" else
-             "variación de caja del mes"),
-            "ok" if eje.get("levered", 0) >= 0 else "mal"),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
             eur(eje.get("fcf", 0)),
             # los tres numeros tienen que sumar al titular a la vista, o el
@@ -693,6 +680,51 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             grupos, ["Fecha", "Factura", "Banco", "Concepto", "Importe"],
             alineacion=["", "", "", "", "r"])
 
+    # ---- que se cobra y que no ------------------------------------------
+    # Un forecast que da por cobrado todo lo vencido no es un forecast. Aqui
+    # se parte en dos, con nombre e importe, para que el proyectado se pueda
+    # mirar a la cara.
+    t_cobrab = ""
+    cbb = meta.get("cobrabilidad")
+    if cbb is not None:
+        dfc, tot = cbb
+        if dfc is not None and not dfc.empty:
+            def por_cliente(sub):
+                if sub.empty:
+                    return '<p class="vacio">Ninguna.</p>'
+                g = []
+                for cl, gg in sorted(sub.groupby("cliente"),
+                                     key=lambda kv: -kv[1]["pendiente_cobro"].sum()):
+                    filas = [[esc(str(r["num"])), esc(str(r.get("vencimiento") or "")),
+                              esc(str(r.get("motivo") or "")),
+                              eur(r["pendiente_cobro"])]
+                             for _, r in gg.sort_values("pendiente_cobro",
+                                                        ascending=False).iterrows()]
+                    g.append((cl, f'<b>{eur(gg["pendiente_cobro"].sum())}</b>', filas))
+                return detalle_desplegable(
+                    g, ["Factura", "Vencimiento", "Motivo", "Pendiente"],
+                    alineacion=["", "", "", "r"])
+
+            n_e = int(dfc["entra"].sum())
+            t_cobrab = f'''
+  <section>
+    <h2>Qué vamos a cobrar y qué no</h2>
+    <p class="h2n">El corte es el retraso: lo vencido hace más de
+     {tot["dias"]} días no se da por cobrado. No es una probabilidad de impago,
+     es una línea puesta donde tú digas (<code>cobros.dias_dudoso</code>). Lo
+     que queda fuera no desaparece: está aquí con su importe, y si sabes que
+     ese cliente sí paga lo metes con <code>previsiones</code>.</p>
+    <div class="kpis">
+      {kpi("Se da por cobrable", eur(tot["entra"]), f"{n_e} facturas", "ok")}
+      {kpi("No se cuenta", eur(tot["fuera"]),
+           f'{tot["n_fuera"]} facturas vencidas hace más de {tot["dias"]} días', "mal")}
+    </div>
+    <h2 style="font-size:15px;margin-top:20px">Lo que no se cuenta</h2>
+    {por_cliente(dfc[~dfc["entra"]])}
+    <h2 style="font-size:15px;margin-top:22px">Lo que sí se espera cobrar</h2>
+    {por_cliente(dfc[dfc["entra"]])}
+  </section>'''
+
     rea = meta.get("realizados")
     det_cob_hechos = realizados_desplegable(rea, "cobro")
     det_pag_hechos = realizados_desplegable(rea, "pago")
@@ -974,6 +1006,27 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         cl_pu = [""] * n_cab + ["sub"] + [""] * n_det + ["sub", "total"]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
+        # EL MISMO PUENTE, BANCO A BANCO. Tu bottom-up esta montado asi, de
+        # modo que cuando el total no coincide esto es lo unico que permite ver
+        # que linea se separa sin adivinar donde estan 200.000 euros.
+        pc = bk.get("por_cuenta") or []
+        if pc:
+            f_pc = [[esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
+                     f'<span class="{"neg" if x["variacion"] < 0 else ""}">'
+                     f'{eur(x["variacion"])}</span>', f'{x["n"]}']
+                    for x in pc]
+            f_pc.append(["<b>Total</b>",
+                         f'<b>{eur(sum(x["inicio"] for x in pc))}</b>',
+                         f'<b>{eur(sum(x["hoy"] for x in pc))}</b>',
+                         f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', ""])
+            t_puente += (
+                '<details><summary>Banco a banco, para contrastar con tu '
+                'bottom-up</summary>'
+                + tabla(["Cuenta", "Al empezar el mes", "Hoy", "Variación",
+                         "Movs."], f_pc,
+                        alineacion=["", "r", "r", "r", "r"],
+                        clases=[""] * len(pc) + ["total"])
+                + '</details>')
         # El hueco declarado por Holded entre banco y contabilidad. Cuando el
         # unlevered no cuadra contra el bottom-up, esto es lo primero que hay
         # que mirar, y hasta ahora no se veia en ningun sitio.
@@ -1532,6 +1585,8 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 <div id="p2" class="panel">
 
   <div class="kpis">{kpis_cob}</div>
+
+  {t_cobrab}
 
   <section>
     <h2>Pendiente de cobro por cliente</h2>

@@ -85,6 +85,16 @@ cobros:
   # anteriores quedan fuera del forecast: o estan cobradas o se cedieron.
   desde_mes: auto
 
+  # QUE SE DA POR COBRABLE Y QUE NO.
+  # Hay 1.079.317 euros en retraso. Dar por hecho que entran todos este mes
+  # proyecta una caja que no va a existir. El corte es el retraso, que es el
+  # unico dato objetivo disponible: lo vencido hace mas de estos dias no se
+  # cuenta en el proyectado, y sale listado con nombre e importe en la pestana
+  # de Cobros para que lo puedas mirar.
+  # No es una probabilidad de impago. Es una linea, y la pones tu. Si sabes que
+  # un cliente de los que caen fuera si va a pagar, se mete con 'previsiones'.
+  dias_dudoso: 90
+
   # Rentings: la cuota existe en el calendario de Eli aunque no haya factura
   # en Holded. Se proyecta como "Ajustes positivos (Rentings)".
   proyectar_rentings_sin_factura: true
