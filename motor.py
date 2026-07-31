@@ -1842,6 +1842,10 @@ class MotorCaja:
             {"concepto": "Otros cobros (intereses, devoluciones, varios)",
              "ejecutado": ej("otros_cob"), "pendiente": 0.0},
         ]
+        # LA DEUDA VA FUERA DE LOS BLOQUES, como en el bottom-up de Alejandro:
+        # primero el UNLEVERED (explotacion pura), debajo los pagos de deuda,
+        # y la suma es el LEVERED, que tiene que cuadrar con la variacion de
+        # las cuentas bancarias. Ese es su modelo y es el orden de la tabla.
         filas_out = [
             {"concepto": "Pago proveedores", "ejecutado": ej("proveedores"),
              "pendiente": m0["pago_proveedores"]},
@@ -1855,37 +1859,58 @@ class MotorCaja:
              "pendiente": pend_rec},
             {"concepto": "Cuotas de tarjeta ya cargadas",
              "ejecutado": ej("tarjetas"), "pendiente": 0.0},
-            {"concepto": "Pagos de deuda (principal e intereses)",
-             "ejecutado": deu_ej, "pendiente": 0.0},
             {"concepto": "Otros pagos (comisiones, traspasos, varios)",
              "ejecutado": ej("otros_pag"), "pendiente": 0.0},
         ]
+        fila_deuda = {"concepto": "Pagos de deuda (principal e intereses)",
+                      "ejecutado": deu_ej, "pendiente": 0.0,
+                      "total": deu_ej}
         for f in filas_in + filas_out:
             f["total"] = f["ejecutado"] + f["pendiente"]
 
         # Los totales de bloque son la suma de sus lineas, no otra cifra
         # calculada por otro camino: asi la tabla suma A LA VISTA. Y como los
-        # cubos son una particion del diario, in_ej + out_ej es exactamente la
-        # variacion contable del mes (dia_cob + dia_pag), sin residuo.
+        # cubos son una particion del diario, unlevered + deuda es exactamente
+        # la variacion contable del mes (dia_cob + dia_pag), sin residuo.
         in_ej = float(sum(f["ejecutado"] for f in filas_in))
         out_ej = float(sum(f["ejecutado"] for f in filas_out))
-        assert abs((in_ej + out_ej) - (dia_cob + dia_pag)) < 0.01
+        assert abs((in_ej + out_ej + deu_ej) - (dia_cob + dia_pag)) < 0.01
         tot = {
             "in_ej": in_ej, "in_pd": m0["cash_in"],
             "out_ej": out_ej, "out_pd": m0["cash_out"],
-            "fcf_ej": in_ej + out_ej, "fcf_pd": m0["fcf"],
+            # el unlevered ARRIBA y la deuda debajo, como en su Excel
+            "unlev_ej": in_ej + out_ej,
+            "unlev_pd": m0["fcf"],       # el pendiente no lleva deuda proyectada
+            "deuda_ej": deu_ej,
+            "lev_ej": in_ej + out_ej + deu_ej,
+            "lev_pd": m0["fcf"],
         }
         tot["in_tot"] = tot["in_ej"] + tot["in_pd"]
         tot["out_tot"] = tot["out_ej"] + tot["out_pd"]
-        tot["fcf_tot"] = tot["fcf_ej"] + tot["fcf_pd"]
-        # unlevered proyectado del mes: el flujo proyectado sin los pagos de
-        # deuda ya hechos. La deuda que quede por pagar en el mes no esta
-        # proyectada linea a linea; se dice, no se inventa.
-        tot["unlevered_tot"] = tot["fcf_tot"] - deu_ej
+        tot["unlev_tot"] = tot["unlev_ej"] + tot["unlev_pd"]
+        tot["lev_tot"] = tot["lev_ej"] + tot["lev_pd"]
+
+        # EL CIERRE DEL CIRCULO: el levered ejecutado ES la variacion contable
+        # de bancos, y sumandole lo pendiente de conciliar del mes tiene que
+        # dar la variacion de los saldos bancarios. Si queda descuadre, se
+        # publica, no se esconde. variacion_saldos = contable + pendiente +
+        # descuadre; el descuadre sale de despejar, y su tamano es el veredicto.
+        cu = self.cuadre()
+        bkv = self.fcf_desde_banco() or {}
+        var_saldos = float(bkv.get("variacion_bancos", 0.0))
+        pn = float(cu.get("pendiente_neto", 0.0)) if cu else 0.0
+        concil = {
+            "contable": tot["lev_ej"],
+            "pendiente": pn,
+            "descuadre": var_saldos - tot["lev_ej"] - pn,
+            "saldos": var_saldos,
+            "tolerancia": float(cu.get("tolerancia", 1)) if cu else 1.0,
+        }
         return {"etiqueta": m0["etiqueta"], "cash_in": filas_in,
-                "cash_out": filas_out, "tot": tot,
+                "cash_out": filas_out, "deuda": fila_deuda, "tot": tot,
+                "concil": concil,
                 "saldo_hoy": fc["saldo_actual"],
-                "saldo_cierre": fc["saldo_actual"] + tot["fcf_pd"]}
+                "saldo_cierre": fc["saldo_actual"] + tot["lev_pd"]}
 
     def alertas(self, fc: dict) -> list[dict]:
         a = []

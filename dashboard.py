@@ -693,36 +693,66 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     if cbb is not None:
         dfc, tot = cbb
         if dfc is not None and not dfc.empty:
+            # EDITABLE. Cada factura lleva su casilla de "se cobra" y su
+            # importe. Al tocar cualquiera, la proyeccion editada se recalcula
+            # en el momento, y el boton genera el bloque `previsiones` listo
+            # para pegar en config.yaml, que es donde la decision se hace
+            # permanente: una pagina estatica no puede guardar nada sola, y
+            # fingir que guarda seria mentir.
+            _seq = [0]
+
             def por_cliente(sub):
                 if sub.empty:
                     return '<p class="vacio">Ninguna.</p>'
                 g = []
                 for cl, gg in sorted(sub.groupby("cliente"),
                                      key=lambda kv: -kv[1]["pendiente_cobro"].sum()):
-                    filas = [[esc(str(r["num"])), esc(str(r.get("vencimiento") or "")),
-                              esc(str(r.get("motivo") or "")),
-                              eur(r["pendiente_cobro"])]
-                             for _, r in gg.sort_values("pendiente_cobro",
-                                                        ascending=False).iterrows()]
+                    filas = []
+                    for _, r in gg.sort_values("pendiente_cobro",
+                                               ascending=False).iterrows():
+                        _seq[0] += 1
+                        k = _seq[0]
+                        entra = bool(r["entra"])
+                        defecto = r["pendiente_cobro"] if entra else 0.0
+                        chk = (f'<input type="checkbox" class="cbx" data-k="{k}" '
+                               f'data-num="{esc(str(r["num"]))}" '
+                               f'data-def="{defecto:.0f}" '
+                               f'{"checked" if entra else ""} '
+                               f'onchange="recalcCob()">')
+                        inp = (f'<input type="number" class="cbi" data-k="{k}" '
+                               f'value="{r["pendiente_cobro"]:.0f}" step="100" '
+                               f'oninput="recalcCob()">')
+                        filas.append([esc(str(r["num"])),
+                                      esc(str(r.get("vencimiento") or "")),
+                                      esc(str(r.get("motivo") or "")),
+                                      eur(r["pendiente_cobro"]), chk, inp])
                     g.append((cl, f'<b>{eur(gg["pendiente_cobro"].sum())}</b>', filas))
                 return detalle_desplegable(
-                    g, ["Factura", "Vencimiento", "Motivo", "Pendiente"],
-                    alineacion=["", "", "", "r"])
+                    g, ["Factura", "Vencimiento", "Motivo", "Pendiente",
+                        "¿Se cobra?", "Importe real"],
+                    alineacion=["", "", "", "r", "c", "r"])
 
             n_e = int(dfc["entra"].sum())
             t_cobrab = f'''
   <section>
-    <h2>Qué vamos a cobrar y qué no</h2>
-    <p class="h2n">El corte es el retraso: lo vencido hace más de
-     {tot["dias"]} días no se da por cobrado. No es una probabilidad de impago,
-     es una línea puesta donde tú digas (<code>cobros.dias_dudoso</code>). Lo
-     que queda fuera no desaparece: está aquí con su importe, y si sabes que
-     ese cliente sí paga lo metes con <code>previsiones</code>.</p>
+    <h2>Qué vamos a cobrar y qué no — edítalo tú</h2>
+    <p class="h2n">El corte automático es el retraso: lo vencido hace más de
+     {tot["dias"]} días no se da por cobrado (<code>cobros.dias_dudoso</code>).
+     Pero la última palabra es tuya: marca qué se cobra y por cuánto, la
+     proyección se recalcula al momento, y el botón te genera el bloque
+     <code>previsiones</code> para pegar en <code>config.yaml</code> y que la
+     decisión quede fija en las siguientes actualizaciones.</p>
     <div class="kpis">
       {kpi("Se da por cobrable", eur(tot["entra"]), f"{n_e} facturas", "ok")}
       {kpi("No se cuenta", eur(tot["fuera"]),
            f'{tot["n_fuera"]} facturas vencidas hace más de {tot["dias"]} días', "mal")}
     </div>
+    <div class="edit-bar">Tu proyección editada de cobros:
+      <b id="cobEd">{eur(tot["entra"])}</b>
+      <span class="apagado">(el motor da por cobrable {eur(tot["entra"])})</span>
+      <button class="btn-mini" onclick="yamlCob()">Generar previsiones para config.yaml</button>
+    </div>
+    <pre id="cobYaml" hidden></pre>
     <h2 style="font-size:15px;margin-top:20px">Lo que no se cuenta</h2>
     {por_cliente(dfc[~dfc["entra"]])}
     <h2 style="font-size:15px;margin-top:22px">Lo que sí se espera cobrar</h2>
@@ -826,9 +856,25 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     if not cli.empty:
         top = cli.reindex(cli[[f"teorico_{m}" for m in meses]].abs().sum(axis=1)
                           .sort_values(ascending=False).index).head(25)
-        detalles["cobro_clientes"] = _desglose(
-            "", [(r["cliente"], [float(r[f"teorico_{m}"]) for m in meses])
-                 for _, r in top.iterrows()])
+        # COMPOSICION HASTA LA FACTURA. El total del cliente y, debajo, cada
+        # factura con su parte en cada mes. Alejandro: "el forecast lo quiero
+        # tambien con composicion de facturas". Sin esto, el numero del
+        # cliente hay que creerselo.
+        dcx = fc.get("detalle_cobros")
+        filas_cc = []
+        for _, r in top.iterrows():
+            filas_cc.append((r["cliente"],
+                             [float(r[f"teorico_{m}"]) for m in meses]))
+            if dcx is not None and not dcx.empty:
+                fs = dcx[dcx["cliente"] == r["cliente"]]
+                for _, f in fs.iterrows():
+                    vals = [float(f[f"teorico_{m}"]) for m in meses]
+                    if sum(abs(v) for v in vals) < 0.01:
+                        continue
+                    vto = f.get("vencimiento")
+                    filas_cc.append((f"· {f['num']}"
+                                     + (f" (vto {vto})" if vto else ""), vals))
+        detalles["cobro_clientes"] = _desglose("", filas_cc)
 
     rent = fc.get("rentings")
     if rent is not None and not rent.empty:
@@ -862,9 +908,30 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     if not prov.empty:
         topp = prov.reindex(prov[[f"pago_{m}" for m in meses]].abs().sum(axis=1)
                             .sort_values(ascending=False).index).head(25)
-        detalles["pago_proveedores"] = _desglose(
-            "", [(r["proveedor"], [-abs(float(r[f"pago_{m}"])) for m in meses])
-                 for _, r in topp.iterrows()])
+        # Facturas del proveedor: cada una cae en el mes de su vencimiento
+        # (los vencidos, arrastrados al mes en curso, que es el criterio del
+        # forecast). El total del proveedor deja de ser un acto de fe.
+        dpx = fc.get("detalle_pagos")
+        fin_mes = {m: (m[:4] + m[4:]) for m in meses}
+        filas_pp = []
+        for _, r in topp.iterrows():
+            filas_pp.append((r["proveedor"],
+                             [-abs(float(r[f"pago_{m}"])) for m in meses]))
+            if dpx is not None and not dpx.empty:
+                fs = dpx[(dpx["proveedor"] == r["proveedor"])
+                         & (dpx["pendiente"] > 0.01)]
+                for _, f in fs.iterrows():
+                    v = f.get("vencimiento")
+                    mv = f"{v.year}{v.month:02d}" if hasattr(v, "year") else ""
+                    idx = 0 if (not mv or mv <= meses[0]) else \
+                        (meses.index(mv) if mv in meses else None)
+                    if idx is None:
+                        continue
+                    vals = [0.0] * len(meses)
+                    vals[idx] = -float(f["pendiente"])
+                    filas_pp.append((f"· {f['num']}"
+                                     + (f" (vto {v})" if v else ""), vals))
+        detalles["pago_proveedores"] = _desglose("", filas_pp)
 
     recu = fc.get("recurrentes")
     if recu is not None and not recu.empty:
@@ -1416,32 +1483,57 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             return "".join(out)
 
         t = mec["tot"]
+        fd = mec["deuda"]
+        cn = mec["concil"]
+        cuadra_cn = abs(cn["descuadre"]) <= max(cn["tolerancia"], 1.0)
         cuerpo = (
             bloque_mc("CASH IN", mec["cash_in"], t["in_ej"], t["in_pd"], t["in_tot"])
-            + bloque_mc("CASH OUT", mec["cash_out"], t["out_ej"], t["out_pd"], t["out_tot"])
-            + f'<tr class="total"><td><b>Flujo del mes</b></td>'
-              f'<td class="r"><b>{eur(t["fcf_ej"])}</b></td>'
-              f'<td class="r"><b>{eur(t["fcf_pd"])}</b></td>'
-              f'<td class="r"><b>{eur(t["fcf_tot"])}</b></td></tr>')
+            + bloque_mc("CASH OUT (sin deuda)", mec["cash_out"],
+                        t["out_ej"], t["out_pd"], t["out_tot"])
+            + f'<tr class="total"><td><b>UNLEVERED FCF</b></td>'
+              f'<td class="r"><b>{eur(t["unlev_ej"])}</b></td>'
+              f'<td class="r"><b>{eur(t["unlev_pd"])}</b></td>'
+              f'<td class="r"><b>{eur(t["unlev_tot"])}</b></td></tr>'
+            + f'<tr><td style="padding-left:22px">{esc(fd["concepto"])} '
+              f'<i>(pendiente del mes no proyectado)</i></td>'
+              f'<td class="r">{_n(fd["ejecutado"])}</td>'
+              f'<td class="r"><span class="apagado">—</span></td>'
+              f'<td class="r">{_n(fd["total"])}</td></tr>'
+            + f'<tr class="total"><td><b>LEVERED FCF</b> = variación de caja</td>'
+              f'<td class="r"><b>{eur(t["lev_ej"])}</b></td>'
+              f'<td class="r"><b>{eur(t["lev_pd"])}</b></td>'
+              f'<td class="r"><b>{eur(t["lev_tot"])}</b></td></tr>')
+        chip_cn = ('<span class="chip ok">cuadra</span>' if cuadra_cn else
+                   f'<span class="chip crit">{eur(cn["descuadre"])} sin explicar</span>')
         t_mes_curso = f'''
   <section>
     <h2>{esc(mec["etiqueta"])} — ejecutado, pendiente y proyectado</h2>
-    <p class="h2n">Como tu hoja «Forecast Caja - Mes en Curso»: lo que ya ha
-     pasado por el banco, lo que queda según el forecast, y la suma, que es el
-     mes proyectado de verdad. El ejecutado sale del libro diario, repartido
-     por la contrapartida de cada asiento: cada euro está en una sola línea y
-     los bloques suman a la vista.</p>
+    <p class="h2n">Como tu hoja «Forecast Caja - Mes en Curso»: lo ya ejecutado
+     (libro diario, cada euro en una sola línea por contrapartida), lo
+     pendiente según el forecast, y la suma. El UNLEVERED arriba, la deuda
+     debajo, y el LEVERED tiene que cuadrar con la variación de las cuentas
+     bancarias. {chip_cn}</p>
     <table>
       <thead><tr><th>Concepto</th><th class="r">Ejecutado</th>
       <th class="r">Pendiente</th><th class="r">Mes proyectado</th></tr></thead>
       <tbody>{cuerpo}</tbody>
     </table>
+    <table style="margin-top:12px;max-width:640px">
+      <thead><tr><th>El levered, contra los bancos</th><th class="r">Importe</th></tr></thead>
+      <tbody>
+        <tr><td>LEVERED ejecutado = variación contable de bancos</td>
+            <td class="r">{eur(cn["contable"])}</td></tr>
+        <tr><td>Pendiente de conciliar del mes (extracto, con signo)</td>
+            <td class="r">{eur(cn["pendiente"])}</td></tr>
+        <tr><td>Descuadre restante</td>
+            <td class="r"><span class="{"" if cuadra_cn else "rojo"}">{eur(cn["descuadre"])}</span></td></tr>
+        <tr class="total"><td><b>= Variación de saldos bancarios (día 1 → hoy)</b></td>
+            <td class="r"><b>{eur(cn["saldos"])}</b></td></tr>
+      </tbody>
+    </table>
     <p class="h2n" style="margin-top:10px">Saldo hoy {eur(mec["saldo_hoy"])} +
-     pendiente {eur(t["fcf_pd"])} = <b>saldo proyectado a cierre
-     {eur(mec["saldo_cierre"])}</b> · unlevered proyectado del mes
-     {eur(t["unlevered_tot"])} (flujo proyectado sin los pagos de deuda ya
-     hechos; la deuda que quede por pagar este mes no está proyectada línea a
-     línea).</p>
+     pendiente {eur(t["lev_pd"])} = <b>saldo proyectado a cierre
+     {eur(mec["saldo_cierre"])}</b>.</p>
   </section>'''
 
     cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
@@ -1500,6 +1592,19 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     else:
         contraste_html = ""
 
+    # ---- boton de descarga del Excel --------------------------------------
+    # El fichero viaja dentro de la propia pagina (data URI): cada recarga
+    # trae el Excel de esa actualizacion, en GitHub Pages, en Cloudflare o
+    # abriendo el HTML desde el disco. Sin rutas que se rompan.
+    btn_excel = ""
+    if meta.get("excel_b64"):
+        btn_excel = (
+            f'<a class="btn-refresh" download="{esc(meta.get("excel_nombre") or "caja_leaseir.xlsx")}" '
+            f'href="data:application/vnd.openxmlformats-officedocument.'
+            f'spreadsheetml.sheet;base64,{meta["excel_b64"]}" '
+            f'title="Tu fichero de trabajo con los datos de esta actualización: '
+            f'Mes en Curso, Bottom Up, Cobros, Pagos y Forecast">⬇ Excel</a>')
+
     # ---- HTML -------------------------------------------------------------
     return f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8">
@@ -1553,6 +1658,7 @@ th{{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.5p
  border-bottom:1.5px solid {P['brand']};white-space:nowrap}}
 td{{padding:7px 10px;border-bottom:1px solid {P['grid']}}}
 th.r,td.r{{text-align:right}}
+th.c,td.c{{text-align:center}}
 tr.sub td{{background:#f1f4f5;font-weight:600}}
 tr.total td{{background:{P['brand']};color:#fff;font-weight:700}}
 tr.total td .neg{{color:#ffc9c9}}
@@ -1613,6 +1719,18 @@ summary{{cursor:pointer;font-size:13px;color:{P['ink2']};font-weight:600;padding
 .tab.activa{{color:{P['brand']};border-bottom-color:{P['brand']}}}
 .panel{{display:none}}
 .panel.visible{{display:block}}
+.edit-bar{{margin:14px 0 4px;padding:10px 14px;background:#f4f7fb;border-radius:9px;
+ font-size:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}}
+.edit-bar b{{font-size:16px}}
+.btn-mini{{margin-left:auto;padding:6px 12px;font-size:13px;font-weight:600;
+ border:1px solid {P['brand']};background:#fff;color:{P['brand']};
+ border-radius:7px;cursor:pointer}}
+.btn-mini:hover{{background:{P['brand']};color:#fff}}
+#cobYaml{{background:#141618;color:#d6e4dd;padding:14px;border-radius:9px;
+ font-size:12px;overflow-x:auto;margin-top:8px}}
+.cbi{{width:104px;padding:3px 6px;font-size:13px;text-align:right;
+ border:1px solid #ccd4dc;border-radius:6px}}
+td .cbx{{transform:scale(1.15)}}
 .buscador{{margin:16px 0 10px}}
 .buscador input{{width:100%;max-width:340px;padding:8px 12px;font-size:14px;
  font-family:inherit;border:1px solid {P['axis']};border-radius:4px;
@@ -1687,6 +1805,7 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   <a class="btn-refresh" href="{url_workflow}" target="_blank" rel="noopener"
      title="Abre GitHub Actions y lanza el workflow: vuelve a leer Holded y el calendario de Eli">
      ⟳ Forzar actualización</a>
+  {btn_excel}
 </div>
 
 {banner}
@@ -1899,6 +2018,7 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 </div>
 
 <script>
+var MES_ACTUAL = "{m0['mes']}";
 document.querySelectorAll('.tab').forEach(function (b) {{
   b.addEventListener('click', function () {{
     document.querySelectorAll('.tab').forEach(function (x) {{ x.classList.remove('activa'); }});
@@ -1937,6 +2057,37 @@ function caldia(d) {{
     var c = document.getElementById('calc' + d);
     if (c) c.classList.add('sel');
   }}
+}}
+function eurJs(v) {{
+  return Math.round(v).toLocaleString('es-ES') + ' €';
+}}
+function recalcCob() {{
+  var tot = 0;
+  document.querySelectorAll('.cbx').forEach(function (c) {{
+    if (!c.checked) return;
+    var i = document.querySelector('.cbi[data-k="' + c.dataset.k + '"]');
+    tot += parseFloat((i && i.value) || 0);
+  }});
+  var e = document.getElementById('cobEd');
+  if (e) e.textContent = eurJs(tot);
+}}
+function yamlCob() {{
+  var out = [];
+  document.querySelectorAll('.cbx').forEach(function (c) {{
+    var i = document.querySelector('.cbi[data-k="' + c.dataset.k + '"]');
+    var imp = c.checked ? parseFloat((i && i.value) || 0) : 0;
+    var def = parseFloat(c.dataset.def || 0);
+    if (Math.abs(imp - def) > 0.5) {{
+      out.push('  - {{ tipo: cobro, clave: "' + c.dataset.num + '", mes: ' + MES_ACTUAL
+               + ', importe: ' + Math.round(imp) + ', nota: "editado en el panel" }}');
+    }}
+  }});
+  var txt = out.length ? 'previsiones:\\n' + out.join('\\n')
+                       : '# tu edicion coincide con el motor: no hace falta ninguna prevision';
+  var pre = document.getElementById('cobYaml');
+  pre.hidden = false;
+  pre.textContent = txt + '\\n\\n# Pegalo en la seccion previsiones de config.yaml y sube el fichero:\\n# la siguiente actualizacion lo aplicara y lo dejara trazado en el panel.';
+  if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () {{}});
 }}
 </script>
 </body></html>"""

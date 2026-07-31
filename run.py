@@ -163,10 +163,26 @@ def main() -> None:
             "cuadre_proyeccion": m.cuadre_proyeccion(fc),
             "url_workflow": (cfg.get("publicacion") or {}).get("url_workflow")}
 
-    # ---- salida ----------------------------------------------------------
-    html = construir(fc, cu, alertas, meta)
+    # ---- Excel: el fichero de trabajo de Alejandro, con datos vivos -------
+    # Va EMBEBIDO en la pagina (data URI): cada recarga trae el Excel de esa
+    # actualizacion sin tocar el workflow ni depender de rutas del hosting.
+    import base64
+    from excel_out import generar as generar_excel
     out = Path(args.salida)
     out.parent.mkdir(parents=True, exist_ok=True)
+    xlsx = out.parent / "caja_leaseir.xlsx"
+    try:
+        generar_excel(xlsx, fc, cu, meta)
+        meta["excel_b64"] = base64.b64encode(xlsx.read_bytes()).decode()
+        meta["excel_nombre"] = f"Forecast CashFlow Leaseir {date.today():%Y%m%d}.xlsx"
+        print(f"Excel         : {xlsx} ({xlsx.stat().st_size / 1024:.0f} KB)")
+    except Exception as e:                              # noqa: BLE001
+        # el panel no se cae porque el Excel falle, pero el fallo se publica
+        calidad.append(f"El Excel de descarga no se ha podido generar: {e}")
+        print(f"  [AVISO] excel: {e}")
+
+    # ---- salida ----------------------------------------------------------
+    html = construir(fc, cu, alertas, meta)
     out.write_text(html, encoding="utf-8")
 
     L = fc["lineas"]
