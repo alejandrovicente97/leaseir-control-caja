@@ -1,5 +1,5 @@
 {
- "extraido_en": "2026-07-31T10:42:26",
+ "extraido_en": "2026-07-31T11:14:38",
  "desde": "2022-01-01",
  "hasta": "2028-12-31",
  "api": "v2",
@@ -106,6 +106,7 @@
    "currency",
    "custom_fields",
    "date",
+   "deduction_date",
    "description",
    "discount",
    "document_number",
