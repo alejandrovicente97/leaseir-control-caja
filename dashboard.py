@@ -503,9 +503,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             cuadre_html += (
                 '<h2 style="font-size:15px;margin-top:22px">Lo que Holded tiene '
                 'sin conciliar</h2>'
-                '<p class="h2n">Movimientos que están en el banco pero todavía no '
-                'en la contabilidad. Es la primera explicación de la diferencia '
-                'de arriba, y lo que hay que conciliar para cerrarla.</p>'
+                '<p class="h2n">Movimientos que están en el extracto del banco y '
+                'todavía no apuntados en contabilidad. Es la diferencia entre lo '
+                'que dice el banco y lo que dice el mayor, y lo que hay que '
+                'conciliar para cerrarla. El importe es la suma en valor '
+                'absoluto: un cobro y un pago del mismo tamaño suman aquí y se '
+                'anulan en el saldo.</p>'
                 + tabla(["Cuenta", "Movimientos", "Importe"],
                         [[esc(x["cuenta"]), f'{x["movimientos"]}', eur(x["importe"])]
                          for x in pc], alineacion=["", "r", "r"]))
@@ -625,40 +628,41 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             elif c.get("rescatada"):
                 marca = ' <span class="chip crit">recuperada</span>'
                 clase = "res"
-            dif = (None if c.get("recons") is None or c.get("listado") is None
-                   or abs(c["listado"]) < 0.005 else c["recons"] - c["listado"])
             f_c.append([esc(c["num"]) or "—", esc(c["cuenta"]) + marca,
                         "—" if c.get("listado") is None else eur(c["listado"]),
-                        "—" if c.get("conta") is None else eur(c["conta"]),
                         "—" if c.get("recons") is None else eur(c["recons"]),
-                        "—" if dif is None else eur(dif)])
+                        eur(c.get("pte") or 0),
+                        "—" if c.get("estimado") is None else eur(c["estimado"]),
+                        "—" if c.get("dif") is None else eur(c["dif"])])
             cl_c.append(clase)
         tot_l = sum(c["listado"] for c in conc if c.get("listado") is not None)
         f_c.append(["<b>Total</b>", "<b>posición publicada</b>",
-                    f"<b>{eur(tot_l + (fc.get('rescatado') or 0))}</b>", "", "", ""])
+                    f"<b>{eur(tot_l + (fc.get('rescatado') or 0))}</b>",
+                    "", "", "", ""])
         cl_c.append("")
         n_ok, n_tot = (fc.get("recons_n") or (0, 0))
         veredicto = (
-            f'El método reconstruye al euro las {n_tot} cuentas que Holded sí '
-            f'sincroniza, así que se da por bueno para la que no.'
+            f'Cuadra en las {n_tot} cuentas que Holded sí sincroniza, así que '
+            f'el método se da por bueno para la que no.'
             if fc.get("recons_ok") and n_tot else
-            f'El método solo acierta en {n_ok} de {n_tot} cuentas conocidas, '
-            f'así que no se aplica: la posición se queda con el listado tal cual.')
+            f'Solo cuadra en {n_ok} de {n_tot} cuentas conocidas, así que no se '
+            f'aplica: la posición se queda con el listado tal cual.')
         t_ban += (
             '<details><summary>Contraste con contabilidad — de dónde sale la '
             'posición</summary>'
             '<p class="h2n">Cada cuenta de tesorería frente a su cuenta '
             'contable, enlazadas por el número de cuenta que da el propio '
             'Holded, no por el nombre. <b>Listado</b> es el saldo que declara '
-            'Holded. <b>Movimiento del año</b> es lo que devuelve la API de '
-            'contabilidad, que no es el saldo sino lo que se ha movido desde '
-            'enero. <b>Reconstruido</b> es ese movimiento más el saldo del 1 '
-            'de enero, que está escrito en el asiento de apertura: eso sí es '
-            'el saldo de hoy, y la última columna mide cuánto se aleja del '
-            'listado. ' + esc(veredicto) + '</p>'
-            + tabla(["Cuenta contable", "Cuenta", "Listado", "Movimiento del año",
-                     "Reconstruido", "Dif."], f_c,
-                    alineacion=["", "", "r", "r", "r", "r"], clases=cl_c)
+            'Holded. <b>Contabilidad</b> es el saldo del 1 de enero (del '
+            'asiento de apertura) más lo movido desde entonces. Las dos cifras '
+            'no tienen por qué coincidir, y no deben: se diferencian en lo que '
+            'está en el extracto y todavía no apuntado, que es la columna '
+            '<b>Pendiente</b>. La prueba es que <b>contabilidad + pendiente = '
+            'banco</b>; la última columna es lo que sobra o falta para que '
+            'cuadre. ' + esc(veredicto) + '</p>'
+            + tabla(["Cuenta contable", "Cuenta", "Listado", "Contabilidad",
+                     "Pendiente", "Contab. + pdte.", "Dif."], f_c,
+                    alineacion=["", "", "r", "r", "r", "r", "r"], clases=cl_c)
             + '</details>')
 
     # ---- cobros y pagos YA REALIZADOS del mes -----------------------------

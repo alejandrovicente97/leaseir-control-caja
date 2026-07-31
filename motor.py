@@ -1073,6 +1073,17 @@ class MotorCaja:
                 # reconstruye bien esas, reconstruye bien la que falta.
                 apert = self._apertura_por_cuenta()
                 por_num = {c["numero"]: c for c in caja_conta}
+                # Lo que hay en el extracto del banco y todavia no en la
+                # contabilidad, CON SIGNO y por cuenta. Es la pieza que faltaba
+                # para comparar las dos cifras: no tienen por que coincidir, y
+                # de hecho no deben, porque se diferencian exactamente en esto.
+                mv = self.d.get("movimientos")
+                neto = {}
+                if (mv is not None and not mv.empty
+                        and "sin_conciliar" in mv.columns):
+                    neto = {str(k): float(v) for k, v in
+                            mv.groupby("cuenta")["sin_conciliar"].sum().items()}
+
                 vistos = set()
                 if "cta_conta" in b.columns:
                     for _, r in b[b["tipo"] == "cuenta"].iterrows():
@@ -1080,33 +1091,49 @@ class MotorCaja:
                         cc = por_num.get(num)
                         if cc:
                             vistos.add(num)
+                        rec = None if not cc else apert.get(num, 0.0) + cc["saldo"]
+                        pte = neto.get(str(r["cuenta"]), 0.0)
                         concilia.append({
                             "cuenta": r["cuenta"], "num": num,
                             "listado": float(r["saldo"]),
                             "conta": None if not cc else cc["saldo"],
-                            "recons": (None if not cc else
-                                       apert.get(num, 0.0) + cc["saldo"]),
+                            "recons": rec,
+                            "pte": pte,
+                            # contabilidad + lo que el banco tiene y ella aun no
+                            "estimado": None if rec is None else rec + pte,
                             "banco": True})
                 # cuentas contables de tesoreria sin ninguna cuenta de Holded
                 # detras: caja en efectivo, intereses. No son banco.
                 for c in caja_conta:
                     if c["numero"] not in vistos:
+                        rec = apert.get(c["numero"], 0.0) + c["saldo"]
                         concilia.append({
                             "cuenta": c["nombre"] or "(sin nombre)",
                             "num": c["numero"], "listado": None,
-                            "conta": c["saldo"],
-                            "recons": apert.get(c["numero"], 0.0) + c["saldo"],
-                            "banco": False})
+                            "conta": c["saldo"], "recons": rec,
+                            "pte": 0.0, "estimado": rec, "banco": False})
 
-                # LA COMPROBACION. Solo cuentan las cuentas que Holded
-                # sincroniza de verdad, o sea las que tienen saldo en el
-                # listado: son las unicas donde hay con que comparar.
+                # LA COMPROBACION, y esta vez la correcta.
+                # La primera version comparaba el saldo reconstruido de
+                # contabilidad contra el saldo del banco y exigia que fuesen
+                # iguales. No lo son ni tienen por que serlo: se diferencian en
+                # los movimientos que estan en el extracto y todavia no
+                # apuntados. Con esa prueba el metodo "fallaba" en 5 de 7
+                # cuentas cuando en realidad estaba bien; en el Sabadell la
+                # diferencia era 20.009 euros y Holded declaraba exactamente
+                # 20.009 euros sin conciliar en esa cuenta.
+                #
+                # La prueba buena es:  contabilidad + pendiente = banco.
+                # Si eso se cumple en las cuentas que Holded sincroniza, el
+                # metodo sabe reconstruir un saldo y se puede usar en la que no.
                 tol = max(2.0, float(self.cfg.get("cuadre", {})
                                      .get("tolerancia_eur", 1)))
                 comp = [c for c in concilia
-                        if c["banco"] and c["recons"] is not None
+                        if c["banco"] and c["estimado"] is not None
                         and abs(c["listado"]) > 0.005]
-                aciertos = [c for c in comp if abs(c["recons"] - c["listado"]) <= tol]
+                for c in comp:
+                    c["dif"] = c["estimado"] - c["listado"]
+                aciertos = [c for c in comp if abs(c["dif"]) <= tol]
                 self.recons_ok = bool(comp) and len(aciertos) == len(comp)
                 self.recons_n = (len(aciertos), len(comp))
 
@@ -1118,24 +1145,25 @@ class MotorCaja:
                 # posicion bancaria y meterla seria cambiar la definicion de la
                 # cifra por la puerta de atras.
                 rescate = [c for c in concilia
-                           if c["banco"] and c["recons"] is not None
+                           if c["banco"] and c["estimado"] is not None
                            and abs(c["listado"]) < 0.005
-                           and abs(c["recons"]) > 1]
+                           and abs(c["estimado"]) > 1]
                 if self.recons_ok and rescate:
-                    self.rescatado = float(sum(c["recons"] for c in rescate))
+                    self.rescatado = float(sum(c["estimado"] for c in rescate))
                     saldo_cta += self.rescatado
                     for c in rescate:
                         c["rescatada"] = True
                     self._avisar(
-                        "Holded declara a cero "
-                        + ", ".join(f"{c['cuenta']}" for c in rescate)
-                        + f", pero en contabilidad tiene movimiento. Se ha "
-                        f"reconstruido su saldo ({self.rescatado:,.0f} EUR) "
-                        f"sumando el asiento de apertura del ejercicio y el "
-                        f"movimiento del ano, metodo que reconstruye al euro "
-                        f"las {self.recons_n[1]} cuentas que Holded si "
-                        f"sincroniza. Esta dentro de la posicion."
-                        .replace(",", " "))
+                        ("Holded declara a cero "
+                         + ", ".join(f"{c['cuenta']}" for c in rescate)
+                         + f", pero en contabilidad tiene movimiento. Su saldo "
+                         f"({self.rescatado:,.0f} EUR) se ha reconstruido con "
+                         f"el saldo del 1 de enero mas el movimiento del ano "
+                         f"mas lo pendiente de conciliar, metodo que reproduce "
+                         f"dentro de tolerancia las {self.recons_n[1]} cuentas "
+                         f"que Holded si sincroniza. Entra en la posicion, "
+                         f"pero es un saldo calculado y no leido del banco: "
+                         f"conviene confirmarlo.").replace(",", " "))
                 elif rescate and not self.recons_ok:
                     self._avisar(
                         f"Hay {len(rescate)} cuenta(s) de tesoreria que Holded "

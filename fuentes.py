@@ -483,9 +483,14 @@ def desde_holded(ruta: Path) -> dict:
             "importe": imp,
             "concepto": _pri(m, "description", "concept", "desc", "notes", defecto=""),
             "conciliado": conc,
-            # un movimiento sin conciliar esta en el banco pero puede no estar
-            # todavia en la contabilidad, y eso es justo el hueco entre las dos
-            "sin_conciliar": abs(imp) - abs(conc),
+            # Un movimiento sin conciliar esta en el extracto del banco y
+            # todavia no en la contabilidad: por eso el saldo del banco y el
+            # contable no dicen lo mismo. CON SIGNO. Guardarlo en valor
+            # absoluto -como estaba- sirve para decir cuanto queda por
+            # conciliar, pero no para cerrar el hueco entre las dos cifras: un
+            # pago de 20.009 sin apuntar y un cobro de 20.009 sin apuntar dan
+            # el mismo numero y mueven el saldo en direcciones contrarias.
+            "sin_conciliar": imp - conc,
             "estado": str(_pri(m, "status", defecto="")),
         })
 
