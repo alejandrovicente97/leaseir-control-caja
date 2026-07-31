@@ -1583,14 +1583,21 @@ class MotorCaja:
             # en los movimientos que estan en el extracto y todavia no
             # apuntados. Contabilidad + pendiente = banco. Lo que quede
             # despues de sumar el pendiente es descuadre DE VERDAD.
+            # SOLO EL PENDIENTE DEL MES. La primera version sumaba lo sin
+            # conciliar de toda la historia (222.343) contra una diferencia
+            # que es solo del mes (102.476), y el "resto sin explicar" salia
+            # de 324.819: peor que no restar nada. Un recibo de mayo sin
+            # conciliar no toca la variacion de julio; el que si la toca es el
+            # movimiento DE JULIO que esta en el extracto y no en el diario.
             mv, ban2 = self.d.get("movimientos"), self.d.get("bancos")
             pend_neto = 0.0
             if (mv is not None and not mv.empty
                     and "sin_conciliar" in mv.columns
                     and ban2 is not None and not ban2.empty):
                 ctas = set(ban2[ban2["tipo"] == "cuenta"]["cuenta"])
-                pend_neto = float(mv[mv["cuenta"].isin(ctas)]
-                                  ["sin_conciliar"].sum())
+                mm = mv[mv["cuenta"].isin(ctas)].copy()
+                mm["mes"] = mm["fecha"].map(mes_de)
+                pend_neto = float(mm[mm["mes"] == mes]["sin_conciliar"].sum())
             resto = dif + pend_neto
             return {
                 "pendiente_neto": pend_neto,
