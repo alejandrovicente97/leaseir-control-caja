@@ -1753,6 +1753,92 @@ class MotorCaja:
     # =======================================================================
     #  ALERTAS
     # =======================================================================
+    def mes_en_curso(self, fc: dict) -> dict | None:
+        """
+        La hoja 'Forecast Caja - Mes en Curso' de Alejandro, que es la vista
+        con la que trabaja: cada linea con lo EJECUTADO hasta hoy, lo
+        PENDIENTE segun el forecast, y la suma, que es el proyectado real del
+        mes. "Con los cobros y pagos pendientes sumados a los ejecutados, que
+        se proyecte." Es exactamente esto.
+
+        El total ejecutado es EXACTO: sale del libro diario (toda linea que
+        toca caja). El reparto del ejecutado entre conceptos es por origen:
+        lo ligado a factura por /payments, los fijos por patron de concepto,
+        la deuda por contrapartida 17/52/66; lo que no casa con nada queda en
+        su propia linea, no se esconde en otra.
+        """
+        m0 = fc["lineas"][fc["meses"][0]]
+        nat = self.caja_por_naturaleza()
+        if nat is None or nat.empty:
+            return None
+        dia_cob = float(nat[nat["importe"] > 0]["importe"].sum())
+        dia_pag = float(nat[nat["importe"] < 0]["importe"].sum())
+
+        rea = self.realizados_mes()
+        cob_fac = float(rea[rea["sentido"] == "cobro"]["importe"].sum()) \
+            if not rea.empty else 0.0
+        pag_fac = float(rea[rea["sentido"] == "pago"]["importe"].sum()) \
+            if not rea.empty else 0.0
+
+        fijos = getattr(self, "fijos_ya_pagados", {}) or {}
+        sal_ej = -abs(fijos.get("salarios", 0.0))
+        sl_ej = -abs(fijos.get("cuotas_sl", 0.0))
+        rec_ej = -abs(fijos.get("recurrentes", 0.0)) - abs(fijos.get("otros_fijos", 0.0))
+
+        bk = self.fcf_desde_banco() or {}
+        deu_ej = float(bk.get("deuda", 0.0))
+
+        otros_cob = dia_cob - cob_fac
+        otros_pag = dia_pag - pag_fac - sal_ej - sl_ej - rec_ej - deu_ej
+
+        pend_ren = m0["rentings_sin_factura"] + m0["ventas_fusion_lml"]
+        pend_aj = m0["ventas_sin_facturar"] + m0["ajustes_cobros"]
+        pend_rec = m0["recurrentes_proyectados"] + m0["otros_fijos"]
+
+        filas_in = [
+            {"concepto": "Cobro clientes", "ejecutado": cob_fac,
+             "pendiente": m0["cobro_clientes"]},
+            {"concepto": "Rentings y cuotas sin factura (calendario de Eli)",
+             "ejecutado": 0.0, "pendiente": pend_ren},
+            {"concepto": "Ventas sin facturar y ajustes",
+             "ejecutado": 0.0, "pendiente": pend_aj},
+            {"concepto": "Otros cobros ya ejecutados sin factura asociada",
+             "ejecutado": otros_cob, "pendiente": 0.0},
+        ]
+        filas_out = [
+            {"concepto": "Pago proveedores", "ejecutado": pag_fac,
+             "pendiente": m0["pago_proveedores"]},
+            {"concepto": "Salarios y seguridad social", "ejecutado": sal_ej,
+             "pendiente": m0["salarios"]},
+            {"concepto": "Cuotas sale & leaseback", "ejecutado": sl_ej,
+             "pendiente": m0["cuotas_sl"]},
+            {"concepto": "Recurrentes y otros fijos", "ejecutado": rec_ej,
+             "pendiente": pend_rec},
+            {"concepto": "Pagos de deuda (principal e intereses)",
+             "ejecutado": deu_ej, "pendiente": 0.0},
+            {"concepto": "Otros pagos ya ejecutados sin factura asociada",
+             "ejecutado": otros_pag, "pendiente": 0.0},
+        ]
+        for f in filas_in + filas_out:
+            f["total"] = f["ejecutado"] + f["pendiente"]
+
+        tot = {
+            "in_ej": dia_cob, "in_pd": m0["cash_in"],
+            "out_ej": dia_pag, "out_pd": m0["cash_out"],
+            "fcf_ej": dia_cob + dia_pag, "fcf_pd": m0["fcf"],
+        }
+        tot["in_tot"] = tot["in_ej"] + tot["in_pd"]
+        tot["out_tot"] = tot["out_ej"] + tot["out_pd"]
+        tot["fcf_tot"] = tot["fcf_ej"] + tot["fcf_pd"]
+        # unlevered proyectado del mes: el flujo proyectado sin los pagos de
+        # deuda ya hechos. La deuda que quede por pagar en el mes no esta
+        # proyectada linea a linea; se dice, no se inventa.
+        tot["unlevered_tot"] = tot["fcf_tot"] - deu_ej
+        return {"etiqueta": m0["etiqueta"], "cash_in": filas_in,
+                "cash_out": filas_out, "tot": tot,
+                "saldo_hoy": fc["saldo_actual"],
+                "saldo_cierre": fc["saldo_actual"] + tot["fcf_pd"]}
+
     def alertas(self, fc: dict) -> list[dict]:
         a = []
         L = fc["lineas"]

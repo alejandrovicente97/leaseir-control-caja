@@ -151,6 +151,7 @@ def main() -> None:
             "realizados": m.realizados_mes(),
             "check_clientes": m.check_clientes(),
             "cobrabilidad": m.cobrabilidad(),
+            "mes_en_curso": m.mes_en_curso(fc),
             "caja_naturaleza": m.caja_por_naturaleza(),
             "serie_unlevered": m.serie_unlevered(6),
             "serie_fcf": m.serie_fcf(6),

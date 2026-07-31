@@ -1388,6 +1388,62 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     nota_ven_antes = (f' Arrastrado de meses anteriores y aún sin pagar: '
                       f'<b>{eur(-ven_antes)}</b>.' if ven_antes > 0.01 else "")
 
+    # ---- el mes en curso: ejecutado + pendiente = proyectado --------------
+    # La hoja "Forecast Caja - Mes en Curso" del Excel de Alejandro, que es
+    # como el trabaja: cada linea con lo ya ejecutado, lo pendiente y la suma.
+    t_mes_curso = ""
+    mec = meta.get("mes_en_curso")
+    if mec:
+        def _n(v, negativo=False):
+            if abs(v) < 0.005:
+                return '<span class="apagado">—</span>'
+            cl = ' class="neg"' if v < 0 else ""
+            return f"<span{cl}>{eur(v)}</span>"
+
+        def bloque_mc(titulo, filas, ej, pd_, tot_):
+            out = [f'<tr class="sub"><td><b>{titulo}</b></td>'
+                   f'<td class="r"><b>{eur(ej)}</b></td>'
+                   f'<td class="r"><b>{eur(pd_)}</b></td>'
+                   f'<td class="r"><b>{eur(tot_)}</b></td></tr>']
+            for f in filas:
+                if (abs(f["ejecutado"]) < 0.005 and abs(f["pendiente"]) < 0.005):
+                    continue
+                out.append(
+                    f'<tr><td style="padding-left:22px">{esc(f["concepto"])}</td>'
+                    f'<td class="r">{_n(f["ejecutado"])}</td>'
+                    f'<td class="r">{_n(f["pendiente"])}</td>'
+                    f'<td class="r">{_n(f["total"])}</td></tr>')
+            return "".join(out)
+
+        t = mec["tot"]
+        cuerpo = (
+            bloque_mc("CASH IN", mec["cash_in"], t["in_ej"], t["in_pd"], t["in_tot"])
+            + bloque_mc("CASH OUT", mec["cash_out"], t["out_ej"], t["out_pd"], t["out_tot"])
+            + f'<tr class="total"><td><b>Flujo del mes</b></td>'
+              f'<td class="r"><b>{eur(t["fcf_ej"])}</b></td>'
+              f'<td class="r"><b>{eur(t["fcf_pd"])}</b></td>'
+              f'<td class="r"><b>{eur(t["fcf_tot"])}</b></td></tr>')
+        t_mes_curso = f'''
+  <section>
+    <h2>{esc(mec["etiqueta"])} — ejecutado, pendiente y proyectado</h2>
+    <p class="h2n">Como tu hoja «Forecast Caja - Mes en Curso»: lo que ya ha
+     pasado por el banco, lo que queda según el forecast, y la suma, que es el
+     mes proyectado de verdad. El ejecutado sale del libro diario; el reparto
+     entre líneas, de los apuntes de liquidación, los patrones de concepto y
+     la contrapartida contable.</p>
+    <table>
+      <thead><tr><th>Concepto</th><th class="r">Ejecutado</th>
+      <th class="r">Pendiente</th><th class="r">Mes proyectado</th></tr></thead>
+      <tbody>{cuerpo}</tbody>
+    </table>
+    <p class="h2n" style="margin-top:10px">Saldo hoy {eur(mec["saldo_hoy"])} +
+     pendiente {eur(t["fcf_pd"])} = <b>saldo proyectado a cierre
+     {eur(mec["saldo_cierre"])}</b> · unlevered proyectado del mes
+     {eur(t["unlevered_tot"])} (flujo proyectado sin los pagos de deuda ya
+     hechos; la deuda que quede por pagar este mes no está proyectada línea a
+     línea).</p>
+  </section>'''
+
     cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
     # Aviso a toda pantalla si los datos de origen no son creibles. Un fallo
     # silencioso de Holded produciria un forecast con pinta de correcto, y eso
@@ -1502,7 +1558,7 @@ tr.total td{{background:{P['brand']};color:#fff;font-weight:700}}
 tr.total td .neg{{color:#ffc9c9}}
 tbody tr:hover td{{background:#f7f9fa}}
 tr.sub:hover td,tr.total:hover td{{background:inherit}}
-.b{{font-weight:650}} .neg{{color:{P['crit']}}}
+.b{{font-weight:650}} .neg{{color:{P['crit']}}} .apagado{{color:#c2c8cf}}
 .calend{{width:100%;table-layout:fixed;border-collapse:collapse;margin-top:6px}}
 .calend th{{font-size:11px;color:#8a94a6;text-align:left;padding:2px 6px;border:none}}
 td.cal{{border:1px solid #e8ecf1;vertical-align:top;height:58px;padding:4px 6px;
@@ -1644,6 +1700,8 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 <div id="p1" class="panel visible">
 
   <div class="kpis">{kpis}</div>
+
+  {t_mes_curso}
 
   <section>
     <h2>Evolución de la caja</h2>
