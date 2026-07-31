@@ -332,6 +332,7 @@ function buscarRun(tok, intento) {
       var reciente = run && (Date.now() - new Date(run.created_at).getTime()) < 120000;
       if (run && reciente) {
         try { localStorage.setItem("lsr_run", JSON.stringify({ id: run.id, t0: Date.now() })); } catch (e) {}
+        medirDuracion(tok);
         poll(run.id, Date.now());
       } else if (intento < 4) {
         setTimeout(function () { buscarRun(tok, intento + 1); }, 4000);
@@ -345,6 +346,25 @@ function buscarRun(tok, intento) {
 function minutos(t0) {
   var s = Math.floor((Date.now() - t0) / 1000);
   return Math.floor(s / 60) + "m " + ("0" + (s % 60)).slice(-2) + "s";
+}
+// Cuanto suele tardar: la MEDIA REAL de los ultimos runs buenos, pedida a la
+// API una vez por actualizacion. Un porcentaje contra un numero inventado es
+// teatro; contra la media de los ultimos cinco, es una estimacion honesta.
+var durTipica = 510;   // arranque: 8m30s, hasta que llega la media real
+function medirDuracion(tok) {
+  fetch(API_WF + "/runs?per_page=6&status=success", { headers: cab(tok) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var runs = (d.workflow_runs || []).slice(0, 5);
+      var ds = runs.map(function (x) {
+        return (new Date(x.updated_at) - new Date(x.run_started_at)) / 1000;
+      }).filter(function (x) { return x > 60 && x < 3600; });
+      if (ds.length >= 2) durTipica = ds.reduce(function (a, b) { return a + b; }, 0) / ds.length;
+    }).catch(function () {});
+}
+function pct(t0) {
+  var p = Math.min(97, Math.round(100 * (Date.now() - t0) / 1000 / durTipica));
+  return p + "%";
 }
 function poll(id, t0) {
   var tok = tokenGH(); if (!tok) return;
@@ -370,7 +390,8 @@ function poll(id, t0) {
         }
       } else {
         var fase = d.status === "queued" ? "en cola en GitHub" : "leyendo Holded y recalculando";
-        estado(fase + "… " + minutos(t0) + " <span class=\"apagado\">(suele tardar 8-9 min)</span>", true);
+        estado(fase + "… <b>" + pct(t0) + "</b> · " + minutos(t0) +
+               " <span class=\"apagado\">de ~" + Math.round(durTipica / 60) + " min</span>", true);
         pollTimer = setTimeout(function () { poll(id, t0); }, 12000);
       }
     })
@@ -381,6 +402,7 @@ function poll(id, t0) {
   try { g = JSON.parse(localStorage.getItem("lsr_run") || "null"); } catch (e) { g = null; }
   if (g && Date.now() - g.t0 < 20 * 60000) {
     var b = document.getElementById("btnRef"); if (b) b.disabled = true;
+    var tk = tokenGH(); if (tk) medirDuracion(tk);
     poll(g.id, g.t0);
   } else if (g) {
     try { localStorage.removeItem("lsr_run"); } catch (e) {}
