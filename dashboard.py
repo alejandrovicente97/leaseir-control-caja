@@ -616,37 +616,49 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # que linea sobra o falta es mirar, no deducir.
     conc = fc.get("conciliacion_caja") or []
     if conc:
-        f_c = []
-        for c in sorted(conc, key=lambda x: -(abs(x.get("listado") or 0)
-                                              + abs(x.get("conta") or 0))):
-            marca = ""
-            if c.get("listado") is None:
-                marca = ' <span class="chip crit">sin cuenta en Holded</span>'
-            elif abs(c["listado"]) < 0.01 and abs(c.get("conta") or 0) > 1:
-                marca = ' <span class="chip crit">a cero en el listado</span>'
+        f_c, cl_c = [], []
+        for c in sorted(conc, key=lambda x: (not x.get("banco"),
+                                             -(abs(x.get("recons") or 0)))):
+            marca, clase = "", ""
+            if not c.get("banco"):
+                marca = ' <span class="chip">no es banco, fuera</span>'
+            elif c.get("rescatada"):
+                marca = ' <span class="chip crit">recuperada</span>'
+                clase = "res"
+            dif = (None if c.get("recons") is None or c.get("listado") is None
+                   or abs(c["listado"]) < 0.005 else c["recons"] - c["listado"])
             f_c.append([esc(c["num"]) or "—", esc(c["cuenta"]) + marca,
                         "—" if c.get("listado") is None else eur(c["listado"]),
                         "—" if c.get("conta") is None else eur(c["conta"]),
-                        "—" if c.get("conta_dh") is None else eur(c["conta_dh"])])
+                        "—" if c.get("recons") is None else eur(c["recons"]),
+                        "—" if dif is None else eur(dif)])
+            cl_c.append(clase)
         tot_l = sum(c["listado"] for c in conc if c.get("listado") is not None)
-        tot_c = sum(c["conta"] for c in conc if c.get("conta") is not None)
-        tot_d = sum(c["conta_dh"] for c in conc if c.get("conta_dh") is not None)
-        f_c.append(["<b>Total</b>", "", f"<b>{eur(tot_l)}</b>",
-                    f"<b>{eur(tot_c)}</b>", f"<b>{eur(tot_d)}</b>"])
+        f_c.append(["<b>Total</b>", "<b>posición publicada</b>",
+                    f"<b>{eur(tot_l + (fc.get('rescatado') or 0))}</b>", "", "", ""])
+        cl_c.append("")
+        n_ok, n_tot = (fc.get("recons_n") or (0, 0))
+        veredicto = (
+            f'El método reconstruye al euro las {n_tot} cuentas que Holded sí '
+            f'sincroniza, así que se da por bueno para la que no.'
+            if fc.get("recons_ok") and n_tot else
+            f'El método solo acierta en {n_ok} de {n_tot} cuentas conocidas, '
+            f'así que no se aplica: la posición se queda con el listado tal cual.')
         t_ban += (
             '<details><summary>Contraste con contabilidad — de dónde sale la '
-            'posición y qué no cuadra</summary>'
+            'posición</summary>'
             '<p class="h2n">Cada cuenta de tesorería frente a su cuenta '
             'contable, enlazadas por el número de cuenta que da el propio '
-            'Holded, no por el nombre. La posición de arriba es la columna '
-            '<b>Listado</b>. Las dos columnas de contabilidad están para ver '
-            'cuál de las dos —si alguna— dice la verdad: el campo <i>balance</i> '
-            'de la API da bancos en negativo y cuentas espejo, así que hoy no '
-            'se usa para nada. Lo que sí importa: si una cuenta sale marcada, '
-            'ahí está el dinero que falta en la posición.</p>'
-            + tabla(["Cuenta contable", "Cuenta", "Listado", "Contab. (balance)",
-                     "Contab. (debe−haber)"], f_c,
-                    alineacion=["", "", "r", "r", "r"])
+            'Holded, no por el nombre. <b>Listado</b> es el saldo que declara '
+            'Holded. <b>Movimiento del año</b> es lo que devuelve la API de '
+            'contabilidad, que no es el saldo sino lo que se ha movido desde '
+            'enero. <b>Reconstruido</b> es ese movimiento más el saldo del 1 '
+            'de enero, que está escrito en el asiento de apertura: eso sí es '
+            'el saldo de hoy, y la última columna mide cuánto se aleja del '
+            'listado. ' + esc(veredicto) + '</p>'
+            + tabla(["Cuenta contable", "Cuenta", "Listado", "Movimiento del año",
+                     "Reconstruido", "Dif."], f_c,
+                    alineacion=["", "", "r", "r", "r", "r"], clases=cl_c)
             + '</details>')
 
     # ---- cobros y pagos YA REALIZADOS del mes -----------------------------
@@ -1321,6 +1333,7 @@ tr.sub:hover td,tr.total:hover td{{background:inherit}}
 .chip.ok{{background:#e6f5e6;color:{P['up']}}}
 .chip.warn{{background:#fdf1d8;color:#8a5d00}}
 .chip.crit{{background:#fbe6e6;color:#a32020}}
+tr.res td{{background:#fbe6e6}}
 .alertas{{list-style:none;margin:0;padding:0}}
 .alertas li{{padding:9px 12px;border-radius:9px;margin-bottom:7px;font-size:14px;
  display:flex;gap:9px;align-items:flex-start}}

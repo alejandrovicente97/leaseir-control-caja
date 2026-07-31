@@ -99,9 +99,20 @@ MESES_DIARIO = int(os.environ.get("LEASEIR_MESES_DIARIO", "6"))
 
 
 def _inicio_diario() -> date:
+    """
+    Los ultimos MESES_DIARIO meses, PERO nunca despues del 1 de enero.
+
+    El asiento de apertura del ejercicio es la unica linea del libro diario
+    donde esta escrito el saldo con el que cada cuenta empezo el ano, y de ahi
+    sale la reconstruccion del saldo de las cuentas que Holded declara a cero
+    -la segunda de Caixa, 24.705 euros-. Con una ventana movil de seis meses
+    eso funciona hasta julio y deja de funcionar en agosto sin que nadie toque
+    nada: la ventana pasa del 1 de enero y el asiento de apertura desaparece.
+    No es un caso raro, es el mes que viene.
+    """
     h = date.today()
     t = (h.year * 12 + h.month - 1) - MESES_DIARIO
-    return date(t // 12, t % 12 + 1, 1)
+    return min(date(t // 12, t % 12 + 1, 1), date(h.year, 1, 1))
 
 
 def _fin_diario() -> date:

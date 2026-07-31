@@ -473,6 +473,33 @@ class MotorCaja:
             f"cuentas): es el saldo que venia del ano anterior, no un flujo.")
         return m[~m["asiento"].isin(apertura)]
 
+    def _apertura_por_cuenta(self) -> dict[str, float]:
+        """
+        Saldo de cada cuenta de caja el 1 de enero, leido del asiento de
+        apertura del ejercicio. Es el unico sitio del libro diario donde esta
+        escrito el saldo con el que se empezo el ano: el resto del diario son
+        movimientos.
+        """
+        dia = self.d.get("diario")
+        if dia is None or dia.empty or "asiento" not in dia.columns:
+            return {}
+        primeros = dia[dia["fecha"].map(
+            lambda f: bool(f) and getattr(f, "month", 0) == 1
+            and getattr(f, "day", 0) == 1)]
+        if primeros.empty:
+            return {}
+        umbral = int((self.cfg.get("cuadre") or {}).get("lineas_apertura", 20))
+        ids = {a for a, g in primeros.groupby("asiento")
+               if g["cuenta"].nunique() >= umbral}
+        if not ids:
+            return {}
+        ap = primeros[primeros["asiento"].isin(ids)]
+        ap = ap[ap["cuenta"].astype(str).str.match(PREF_CAJA)]
+        if ap.empty:
+            return {}
+        return {str(k): float(v)
+                for k, v in ap.groupby("cuenta")["importe"].sum().items()}
+
     def _avisar(self, texto: str) -> str:
         """Deja el aviso en la lista de calidad del dato y lo devuelve."""
         if texto not in self.avisos:
@@ -565,7 +592,11 @@ class MotorCaja:
         # El saldo de Holded es el de HOY. Para cualquier mes, el saldo con el
         # que empezo se deduce hacia atras quitando todo lo que ha pasado desde
         # entonces: no hace falta guardar historico de saldos.
-        hoy_total = float(ban[ban["tipo"] == "cuenta"]["saldo"].sum())
+        # El mismo saldo que publica el KPI de posicion, correccion incluida:
+        # si el puente partiera del listado en bruto y el KPI del listado
+        # corregido, los 24.705 de la cuenta de Caixa que Holded declara a cero
+        # apareceria como flujo del mes en vez de como saldo que ya estaba.
+        hoy_total = self._conciliar_caja()["saldo"]
         variacion = float(del_mes["importe"].sum())
         posterior = float(m[m["mes"] > mes]["importe"].sum())
         saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
@@ -978,6 +1009,149 @@ class MotorCaja:
         return cli, prov, rastro
 
     # =======================================================================
+    def _conciliar_caja(self) -> dict:
+        """
+        Reconstruye la posicion bancaria y la contrasta con contabilidad.
+
+        Se cachea porque la usan el forecast y el puente al unlevered, y
+        tienen que partir del mismo numero: si el KPI de posicion y el saldo
+        de hoy del puente se calculasen por separado, cualquier correccion
+        aplicada en uno y no en el otro saldria como flujo inventado.
+        """
+        if getattr(self, '_cc', None) is not None:
+            return self._cc
+        b = self.d['bancos']
+        saldo_cta = (float(b[b['tipo'] == 'cuenta']['saldo'].sum())
+                     if not b.empty else 0.0)
+        # LA POSICION ES LA DEL LISTADO DE TESORERIA. Se probo sacarla del plan
+        # contable sumando las cuentas 57*, y el resultado publicado fue
+        # -2.997.589 euros contra los 358.864 del listado. O sea que el saldo
+        # que devuelve /accounting-accounts no es el saldo a fecha de hoy de esa
+        # cuenta: hay cuentas espejo (dos "Caja, euros" con +9.405 y -9.405) y
+        # bancos en negativo que en el banco tienen dinero. Hasta saber que
+        # mide exactamente ese campo, no manda sobre la posicion.
+        #
+        # Lo que si se hace es CONTRASTAR las dos fuentes cuenta a cuenta y
+        # publicar el contraste, porque el problema de origen sigue ahi: hay
+        # una segunda cuenta de Caixa con 24.705 euros que en el listado de
+        # tesoreria figura a cero, y por eso la posicion sale 23.806 corta
+        # contra los 382.670,40 de Alejandro. El enlace es el numero de cuenta
+        # contable que trae el propio listado, no el nombre.
+        pc = self.d.get("plan_contable")
+        self.saldo_tesoreria = saldo_cta
+        self.saldo_conta_hoy = None
+        self.rescatado = 0.0
+        self.recons_ok, self.recons_n = False, (0, 0)
+        caja_conta, concilia = [], []
+        if pc is not None and not pc.empty:
+            c57 = pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
+            if not c57.empty:
+                dh = (c57["debe"].fillna(0) - c57["haber"].fillna(0)
+                      if {"debe", "haber"} <= set(c57.columns)
+                      else c57["saldo"] * 0)
+                self.saldo_conta_hoy = float(c57["saldo"].sum())
+                self.saldo_conta_dh = float(dh.sum())
+                caja_conta = [
+                    {"numero": str(r["numero"]), "nombre": r.get("nombre", ""),
+                     "saldo": float(r["saldo"]),
+                     "debe_haber": float((r.get("debe") or 0) - (r.get("haber") or 0))}
+                    for _, r in c57.iterrows()
+                    if abs(float(r["saldo"])) > 0.005
+                    or abs(float((r.get("debe") or 0) - (r.get("haber") or 0))) > 0.005]
+                caja_conta.sort(key=lambda x: -x["saldo"])
+
+                # QUE ES EL CAMPO balance DE /accounting-accounts.
+                # No es el saldo de la cuenta: da el Sabadell en -2.027.759
+                # cuando en el banco hay 25.843. Es el MOVIMIENTO DEL
+                # EJERCICIO, sin el asiento de apertura. Sumandole el saldo del
+                # 1 de enero -que si esta escrito, en el propio asiento de
+                # apertura del libro diario- sale el saldo de hoy.
+                #
+                # Esto no se da por bueno porque encaje bien: se comprueba
+                # cuenta a cuenta contra el listado de tesoreria, que para las
+                # cuentas que Holded sincroniza es el saldo real del banco. Si
+                # reconstruye bien esas, reconstruye bien la que falta.
+                apert = self._apertura_por_cuenta()
+                por_num = {c["numero"]: c for c in caja_conta}
+                vistos = set()
+                if "cta_conta" in b.columns:
+                    for _, r in b[b["tipo"] == "cuenta"].iterrows():
+                        num = str(r.get("cta_conta") or "")
+                        cc = por_num.get(num)
+                        if cc:
+                            vistos.add(num)
+                        concilia.append({
+                            "cuenta": r["cuenta"], "num": num,
+                            "listado": float(r["saldo"]),
+                            "conta": None if not cc else cc["saldo"],
+                            "recons": (None if not cc else
+                                       apert.get(num, 0.0) + cc["saldo"]),
+                            "banco": True})
+                # cuentas contables de tesoreria sin ninguna cuenta de Holded
+                # detras: caja en efectivo, intereses. No son banco.
+                for c in caja_conta:
+                    if c["numero"] not in vistos:
+                        concilia.append({
+                            "cuenta": c["nombre"] or "(sin nombre)",
+                            "num": c["numero"], "listado": None,
+                            "conta": c["saldo"],
+                            "recons": apert.get(c["numero"], 0.0) + c["saldo"],
+                            "banco": False})
+
+                # LA COMPROBACION. Solo cuentan las cuentas que Holded
+                # sincroniza de verdad, o sea las que tienen saldo en el
+                # listado: son las unicas donde hay con que comparar.
+                tol = max(2.0, float(self.cfg.get("cuadre", {})
+                                     .get("tolerancia_eur", 1)))
+                comp = [c for c in concilia
+                        if c["banco"] and c["recons"] is not None
+                        and abs(c["listado"]) > 0.005]
+                aciertos = [c for c in comp if abs(c["recons"] - c["listado"]) <= tol]
+                self.recons_ok = bool(comp) and len(aciertos) == len(comp)
+                self.recons_n = (len(aciertos), len(comp))
+
+                # Y LA CORRECCION, solo si la comprobacion ha pasado: cuentas
+                # que Holded reconoce como cuenta de tesoreria pero declara a
+                # cero, teniendo movimiento contable. Es el caso de la segunda
+                # de Caixa. Las cuentas contables sin cuenta de tesoreria
+                # detras se enseñan pero NO se suman: la caja en efectivo no es
+                # posicion bancaria y meterla seria cambiar la definicion de la
+                # cifra por la puerta de atras.
+                rescate = [c for c in concilia
+                           if c["banco"] and c["recons"] is not None
+                           and abs(c["listado"]) < 0.005
+                           and abs(c["recons"]) > 1]
+                if self.recons_ok and rescate:
+                    self.rescatado = float(sum(c["recons"] for c in rescate))
+                    saldo_cta += self.rescatado
+                    for c in rescate:
+                        c["rescatada"] = True
+                    self._avisar(
+                        "Holded declara a cero "
+                        + ", ".join(f"{c['cuenta']}" for c in rescate)
+                        + f", pero en contabilidad tiene movimiento. Se ha "
+                        f"reconstruido su saldo ({self.rescatado:,.0f} EUR) "
+                        f"sumando el asiento de apertura del ejercicio y el "
+                        f"movimiento del ano, metodo que reconstruye al euro "
+                        f"las {self.recons_n[1]} cuentas que Holded si "
+                        f"sincroniza. Esta dentro de la posicion."
+                        .replace(",", " "))
+                elif rescate and not self.recons_ok:
+                    self._avisar(
+                        f"Hay {len(rescate)} cuenta(s) de tesoreria que Holded "
+                        f"declara a cero con movimiento contable detras, pero "
+                        f"no se suman a la posicion: el metodo para "
+                        f"reconstruir su saldo solo acierta en "
+                        f"{self.recons_n[0]} de {self.recons_n[1]} cuentas "
+                        f"conocidas, asi que no es de fiar. Estan listadas en "
+                        f"el contraste con contabilidad.")
+
+        self._cc = {'saldo': saldo_cta, 'listado': self.saldo_tesoreria,
+                    'conciliacion': concilia, 'rescatado': self.rescatado,
+                    'recons_ok': self.recons_ok, 'recons_n': self.recons_n,
+                    'caja_contable': caja_conta}
+        return self._cc
+
     def forecast(self) -> dict:
         cli = self.cobros_por_cliente()
         rent = self.rentings_sin_factura()
@@ -1048,74 +1222,9 @@ class MotorCaja:
 
         # posicion bancaria y proyeccion de saldo
         b = self.d["bancos"]
-        saldo_cta = float(b[b["tipo"] == "cuenta"]["saldo"].sum()) if not b.empty else 0.0
-
-        # LA POSICION SALE DE CONTABILIDAD, NO DE LA LISTA DE CUENTAS.
-        # Faltaba una segunda cuenta de Caixa con 24.705 euros: en el listado de
-        # tesoreria de Holded figura con saldo cero, y sumando esa lista la
-        # posicion salia 358.864 cuando son 382.670. Sumando las cuentas 57* del
-        # plan contable el problema desaparece, y ademas desaparece por el
-        # motivo correcto: en el plan, las polizas son 52* y las tarjetas
-        # tambien, asi que quedan fuera por definicion contable y no porque yo
-        # acierte a reconocerlas por el nombre. Adivinar por el nombre funciona
-        # hasta que alguien abre una cuenta que se llama distinto.
-        # LA POSICION ES LA DEL LISTADO DE TESORERIA. Se probo sacarla del plan
-        # contable sumando las cuentas 57*, y el resultado publicado fue
-        # -2.997.589 euros contra los 358.864 del listado. O sea que el saldo
-        # que devuelve /accounting-accounts no es el saldo a fecha de hoy de esa
-        # cuenta: hay cuentas espejo (dos "Caja, euros" con +9.405 y -9.405) y
-        # bancos en negativo que en el banco tienen dinero. Hasta saber que
-        # mide exactamente ese campo, no manda sobre la posicion.
-        #
-        # Lo que si se hace es CONTRASTAR las dos fuentes cuenta a cuenta y
-        # publicar el contraste, porque el problema de origen sigue ahi: hay
-        # una segunda cuenta de Caixa con 24.705 euros que en el listado de
-        # tesoreria figura a cero, y por eso la posicion sale 23.806 corta
-        # contra los 382.670,40 de Alejandro. El enlace es el numero de cuenta
-        # contable que trae el propio listado, no el nombre.
-        pc = self.d.get("plan_contable")
-        self.saldo_tesoreria = saldo_cta
-        self.saldo_conta_hoy = None
-        caja_conta, concilia = [], []
-        if pc is not None and not pc.empty:
-            c57 = pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
-            if not c57.empty:
-                dh = (c57["debe"].fillna(0) - c57["haber"].fillna(0)
-                      if {"debe", "haber"} <= set(c57.columns)
-                      else c57["saldo"] * 0)
-                self.saldo_conta_hoy = float(c57["saldo"].sum())
-                self.saldo_conta_dh = float(dh.sum())
-                caja_conta = [
-                    {"numero": str(r["numero"]), "nombre": r.get("nombre", ""),
-                     "saldo": float(r["saldo"]),
-                     "debe_haber": float((r.get("debe") or 0) - (r.get("haber") or 0))}
-                    for _, r in c57.iterrows()
-                    if abs(float(r["saldo"])) > 0.005
-                    or abs(float((r.get("debe") or 0) - (r.get("haber") or 0))) > 0.005]
-                caja_conta.sort(key=lambda x: -x["saldo"])
-
-                # Contraste cuenta a cuenta por numero de cuenta contable.
-                por_num = {c["numero"]: c for c in caja_conta}
-                vistos = set()
-                if "cta_conta" in b.columns:
-                    for _, r in b[b["tipo"] == "cuenta"].iterrows():
-                        num = str(r.get("cta_conta") or "")
-                        cc = por_num.get(num)
-                        if cc:
-                            vistos.add(num)
-                        concilia.append({
-                            "cuenta": r["cuenta"], "num": num,
-                            "listado": float(r["saldo"]),
-                            "conta": None if not cc else cc["saldo"],
-                            "conta_dh": None if not cc else cc["debe_haber"]})
-                # cuentas contables de tesoreria sin ninguna cuenta de Holded
-                # detras: son las candidatas a ser la que falta
-                for c in caja_conta:
-                    if c["numero"] not in vistos:
-                        concilia.append({
-                            "cuenta": f"(sin cuenta en el listado) {c['nombre']}",
-                            "num": c["numero"], "listado": None,
-                            "conta": c["saldo"], "conta_dh": c["debe_haber"]})
+        cc = self._conciliar_caja()
+        saldo_cta = cc['saldo']
+        concilia, caja_conta = cc['conciliacion'], cc['caja_contable']
 
         # POLIZAS. El saldo que da Holded es lo DISPUESTO, en negativo. El
         # disponible es limite - dispuesto, y el limite no lo publica la API:
@@ -1242,7 +1351,9 @@ class MotorCaja:
             "saldo_tesoreria": self.saldo_tesoreria,
             "caja_contable": caja_conta,
             "conciliacion_caja": concilia,
-            "saldo_conta_dh": getattr(self, "saldo_conta_dh", None),
+            "rescatado": self.rescatado,
+            "recons_ok": self.recons_ok,
+            "recons_n": self.recons_n,
             "dif_tesoreria": (None if self.saldo_conta_hoy is None
                               else self.saldo_conta_hoy - self.saldo_tesoreria),
             "detalle": {"salarios": sal_det, "cuotas_sl": sl_det,
