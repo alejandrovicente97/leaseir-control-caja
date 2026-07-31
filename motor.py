@@ -1768,64 +1768,112 @@ class MotorCaja:
         su propia linea, no se esconde en otra.
         """
         m0 = fc["lineas"][fc["meses"][0]]
-        nat = self.caja_por_naturaleza()
-        if nat is None or nat.empty:
+        dia = self.d.get("diario")
+        if dia is None or dia.empty:
             return None
-        dia_cob = float(nat[nat["importe"] > 0]["importe"].sum())
-        dia_pag = float(nat[nat["importe"] < 0]["importe"].sum())
+        d = self._sin_apertura(dia[dia["mes"] == self.mes])
+        caja = d[d["cuenta"].astype(str).str.match(PREF_CAJA)]
+        if caja.empty:
+            return None
+        resto_d = d[~d["cuenta"].astype(str).str.match(PREF_CAJA)]
 
-        rea = self.realizados_mes()
-        cob_fac = float(rea[rea["sentido"] == "cobro"]["importe"].sum()) \
-            if not rea.empty else 0.0
-        pag_fac = float(rea[rea["sentido"] == "pago"]["importe"].sum()) \
-            if not rea.empty else 0.0
+        # EL REPARTO SALE DE UNA SOLA FUENTE: el libro diario, por la
+        # contrapartida de cada asiento. La primera version mezclaba tres
+        # clasificaciones (liquidaciones de factura, patrones de concepto y
+        # contrapartida) y como se solapan -la cuota de S&L tiene factura Y
+        # casa con el patron "cuota"- el residuo salia POSITIVO en el CASH
+        # OUT: +168.822 de "otros pagos" que no eran pagos, eran euros
+        # contados dos veces en otras lineas. Con una unica particion cada
+        # euro cae en exactamente una linea y la suma es la variacion
+        # contable del mes, al euro.
+        contra, nomb = {}, {}
+        for asiento, g in resto_d.groupby("asiento"):
+            i = g["importe"].abs().idxmax()
+            contra[asiento] = str(g.loc[i, "cuenta"])
+            nomb[asiento] = str(g.loc[i, "cuenta_nombre"]
+                                if "cuenta_nombre" in g else "")
+        c = caja.copy()
+        c["cta"] = c["asiento"].map(lambda a: contra.get(a, ""))
+        c["nom"] = c["asiento"].map(lambda a: nomb.get(a, ""))
 
-        fijos = getattr(self, "fijos_ya_pagados", {}) or {}
-        sal_ej = -abs(fijos.get("salarios", 0.0))
-        sl_ej = -abs(fijos.get("cuotas_sl", 0.0))
-        rec_ej = -abs(fijos.get("recurrentes", 0.0)) - abs(fijos.get("otros_fijos", 0.0))
+        pref_deuda = tuple(str(x) for x in
+                           (self.cfg.get("cuadre") or {}).get("cuentas_deuda")
+                           or ["17", "52", "527", "66"])
+        ents_sl = {norm(o.get("proveedor", "")) for o in
+                   (self.cfg.get("cuotas_sl") or {}).get("operaciones") or []}
+        ents_sl.discard("")
 
-        bk = self.fcf_desde_banco() or {}
-        deu_ej = float(bk.get("deuda", 0.0))
+        def cubo(r):
+            cta, nom, imp = r["cta"], r["nom"], r["importe"]
+            if cta.startswith(pref_deuda):
+                # la tarjeta vive en cuentas 52 pero no es servicio de deuda
+                return ("tarjetas" if clasificar_cuenta(nom) == "tarjeta"
+                        else "deuda")
+            if imp > 0:
+                return "clientes" if cta.startswith(("43", "44")) else "otros_cob"
+            if cta.startswith(("400", "401", "410", "411")):
+                return "sl" if norm(nom) in ents_sl else "proveedores"
+            if cta.startswith(("465", "466", "476", "64")):
+                return "salarios"
+            if cta.startswith(("470", "471", "472", "473", "474", "475")):
+                return "impuestos"
+            return "otros_pag"
 
-        otros_cob = dia_cob - cob_fac
-        otros_pag = dia_pag - pag_fac - sal_ej - sl_ej - rec_ej - deu_ej
+        c["cubo"] = c.apply(cubo, axis=1)
+        e = c.groupby("cubo")["importe"].sum().to_dict()
+        ej = lambda k: float(e.get(k, 0.0))
+        dia_cob = float(c[c["importe"] > 0]["importe"].sum())
+        dia_pag = float(c[c["importe"] < 0]["importe"].sum())
+        deu_ej = ej("deuda")
 
         pend_ren = m0["rentings_sin_factura"] + m0["ventas_fusion_lml"]
         pend_aj = m0["ventas_sin_facturar"] + m0["ajustes_cobros"]
         pend_rec = m0["recurrentes_proyectados"] + m0["otros_fijos"]
 
+        # los cubos con signo mezclado (un abono de proveedor es positivo)
+        # se quedan donde su contrapartida dice, no donde el signo apunta
         filas_in = [
-            {"concepto": "Cobro clientes", "ejecutado": cob_fac,
+            {"concepto": "Cobro clientes", "ejecutado": ej("clientes"),
              "pendiente": m0["cobro_clientes"]},
             {"concepto": "Rentings y cuotas sin factura (calendario de Eli)",
              "ejecutado": 0.0, "pendiente": pend_ren},
             {"concepto": "Ventas sin facturar y ajustes",
              "ejecutado": 0.0, "pendiente": pend_aj},
-            {"concepto": "Otros cobros ya ejecutados sin factura asociada",
-             "ejecutado": otros_cob, "pendiente": 0.0},
+            {"concepto": "Otros cobros (intereses, devoluciones, varios)",
+             "ejecutado": ej("otros_cob"), "pendiente": 0.0},
         ]
         filas_out = [
-            {"concepto": "Pago proveedores", "ejecutado": pag_fac,
+            {"concepto": "Pago proveedores", "ejecutado": ej("proveedores"),
              "pendiente": m0["pago_proveedores"]},
-            {"concepto": "Salarios y seguridad social", "ejecutado": sal_ej,
+            {"concepto": "Salarios y seguridad social", "ejecutado": ej("salarios"),
              "pendiente": m0["salarios"]},
-            {"concepto": "Cuotas sale & leaseback", "ejecutado": sl_ej,
+            {"concepto": "Impuestos", "ejecutado": ej("impuestos"),
+             "pendiente": 0.0},
+            {"concepto": "Cuotas sale & leaseback", "ejecutado": ej("sl"),
              "pendiente": m0["cuotas_sl"]},
-            {"concepto": "Recurrentes y otros fijos", "ejecutado": rec_ej,
+            {"concepto": "Recurrentes y otros fijos", "ejecutado": 0.0,
              "pendiente": pend_rec},
+            {"concepto": "Cuotas de tarjeta ya cargadas",
+             "ejecutado": ej("tarjetas"), "pendiente": 0.0},
             {"concepto": "Pagos de deuda (principal e intereses)",
              "ejecutado": deu_ej, "pendiente": 0.0},
-            {"concepto": "Otros pagos ya ejecutados sin factura asociada",
-             "ejecutado": otros_pag, "pendiente": 0.0},
+            {"concepto": "Otros pagos (comisiones, traspasos, varios)",
+             "ejecutado": ej("otros_pag"), "pendiente": 0.0},
         ]
         for f in filas_in + filas_out:
             f["total"] = f["ejecutado"] + f["pendiente"]
 
+        # Los totales de bloque son la suma de sus lineas, no otra cifra
+        # calculada por otro camino: asi la tabla suma A LA VISTA. Y como los
+        # cubos son una particion del diario, in_ej + out_ej es exactamente la
+        # variacion contable del mes (dia_cob + dia_pag), sin residuo.
+        in_ej = float(sum(f["ejecutado"] for f in filas_in))
+        out_ej = float(sum(f["ejecutado"] for f in filas_out))
+        assert abs((in_ej + out_ej) - (dia_cob + dia_pag)) < 0.01
         tot = {
-            "in_ej": dia_cob, "in_pd": m0["cash_in"],
-            "out_ej": dia_pag, "out_pd": m0["cash_out"],
-            "fcf_ej": dia_cob + dia_pag, "fcf_pd": m0["fcf"],
+            "in_ej": in_ej, "in_pd": m0["cash_in"],
+            "out_ej": out_ej, "out_pd": m0["cash_out"],
+            "fcf_ej": in_ej + out_ej, "fcf_pd": m0["fcf"],
         }
         tot["in_tot"] = tot["in_ej"] + tot["in_pd"]
         tot["out_tot"] = tot["out_ej"] + tot["out_pd"]
