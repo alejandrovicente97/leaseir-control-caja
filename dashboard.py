@@ -626,7 +626,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             if not c.get("banco"):
                 marca = ' <span class="chip">no es banco, fuera</span>'
             elif c.get("rescatada"):
-                marca = ' <span class="chip crit">recuperada</span>'
+                marca = (f' <span class="chip crit">saldo tuyo, '
+                         f'{esc(c["manual"])}</span>' if c.get("manual")
+                         else ' <span class="chip crit">reconstruida</span>')
                 clase = "res"
             f_c.append([esc(c["num"]) or "—", esc(c["cuenta"]) + marca,
                         "—" if c.get("listado") is None else eur(c["listado"]),
@@ -642,8 +644,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         cl_c.append("")
         n_ok, n_tot = (fc.get("recons_n") or (0, 0))
         veredicto = (
-            f'Cuadra en las {n_tot} cuentas que Holded sí sincroniza, así que '
-            f'el método se da por bueno para la que no.'
+            f'Cuadra en {n_ok} de las {n_tot} cuentas que Holded sí sincroniza, '
+            f'suficiente para dar el método por bueno en la que no.'
             if fc.get("recons_ok") and n_tot else
             f'Solo cuadra en {n_ok} de {n_tot} cuentas conocidas, así que no se '
             f'aplica: la posición se queda con el listado tal cual.')

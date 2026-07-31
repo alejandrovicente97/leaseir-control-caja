@@ -171,6 +171,30 @@ tesoreria:
   # verdad son 326.155 y el resto esta en la poliza 9418.
   polizas_en_caja: false
 
+  # Cuentas cuyo saldo Holded declara a CERO teniendo movimiento contable
+  # detras: normalmente porque el banco no esta sincronizado. El panel las
+  # reconstruye (saldo del 1 de enero + movimiento del ano + lo pendiente de
+  # conciliar), pero si tu sabes el saldo, tu numero manda: escribelo aqui.
+  #
+  # Descomenta y confirma. Es la segunda cuenta de Caixa, la que hacia que la
+  # posicion saliera 358.864 en vez de 382.670. La reconstruccion da 25.647;
+  # tu dijiste 24.705. Con el saldo escrito aqui se acaba la discusion, pero
+  # OJO: un saldo a mano no se actualiza solo, asi que la fecha de "confirmado"
+  # sale en el panel para que se vea cuando envejece.
+  saldos_manuales: []
+  # saldos_manuales:
+  #   - cuenta: "CAIXABANK (8744)"
+  #     saldo: 24705
+  #     confirmado: "2026-07-31"
+
+  # Que parte de las cuentas que Holded si sincroniza tiene que cuadrar
+  # (contabilidad + pendiente = banco) para dar por bueno el metodo de
+  # reconstruccion. No se exige el pleno a proposito: lo pendiente de conciliar
+  # cambia mientras alguien concilia, y entre dos ejecuciones separadas veinte
+  # minutos el Sabadell paso de 20.009 de diferencia a cero. Con el pleno, la
+  # posicion se corregiria o no segun por donde fuese el contable esa manana.
+  minimo_cuadre: 0.6
+
 # ---------------------------------------------------------------------------
 # 3.quater LO YA PAGADO DEL MES EN CURSO
 # ---------------------------------------------------------------------------

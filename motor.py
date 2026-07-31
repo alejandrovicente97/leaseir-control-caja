@@ -1134,8 +1134,21 @@ class MotorCaja:
                 for c in comp:
                     c["dif"] = c["estimado"] - c["listado"]
                 aciertos = [c for c in comp if abs(c["dif"]) <= tol]
-                self.recons_ok = bool(comp) and len(aciertos) == len(comp)
                 self.recons_n = (len(aciertos), len(comp))
+                # No se exige que cuadren TODAS. Lo pendiente de conciliar se
+                # mueve mientras alguien concilia: entre dos ejecuciones
+                # separadas veinte minutos, el Sabadell paso de 20.009 de
+                # diferencia a cero. Exigir el pleno significa que la posicion
+                # se corrige o no segun por donde vaya el contable esa manana,
+                # y eso es peor que una regla con un umbral escrito.
+                # Con techo, no redondeando: con redondeo, 0,6 sobre dos
+                # cuentas da 1, o sea que bastaba con que la mitad cuadrase.
+                # Y hacen falta al menos tres cuentas con las que comparar:
+                # con una o dos, "la mayoria cuadra" no significa nada.
+                minimo = float((self.cfg.get("tesoreria") or {})
+                               .get("minimo_cuadre", 0.6))
+                need = -(-int(minimo * 100) * len(comp) // 100)   # ceil
+                self.recons_ok = len(comp) >= 3 and len(aciertos) >= max(1, need)
 
                 # Y LA CORRECCION, solo si la comprobacion ha pasado: cuentas
                 # que Holded reconoce como cuenta de tesoreria pero declara a
@@ -1148,6 +1161,21 @@ class MotorCaja:
                            if c["banco"] and c["estimado"] is not None
                            and abs(c["listado"]) < 0.005
                            and abs(c["estimado"]) > 1]
+
+                # Un saldo escrito a mano en config.yaml manda sobre todo lo
+                # anterior. Es para la cuenta que Holded no sincroniza y de la
+                # que tu sabes el saldo: mas vale un numero confirmado por
+                # alguien que un numero deducido por mi. Se avisa de la fecha
+                # en que se confirmo, porque un saldo escrito a mano envejece.
+                manual = {str(x.get("cuenta") or ""): x for x in
+                          ((self.cfg.get("tesoreria") or {})
+                           .get("saldos_manuales") or [])}
+                for c in rescate:
+                    mm = manual.get(str(c["cuenta"]))
+                    if mm and mm.get("saldo") is not None:
+                        c["estimado"] = float(mm["saldo"])
+                        c["manual"] = mm.get("confirmado") or "sin fecha"
+
                 if self.recons_ok and rescate:
                     self.rescatado = float(sum(c["estimado"] for c in rescate))
                     saldo_cta += self.rescatado
