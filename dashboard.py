@@ -461,6 +461,51 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                 ["Variación de saldo bancario", "<i>pendiente de Holded</i>"],
                 ["Diferencia", "<i>—</i>"],
             ]))
+    elif cuadre.get("fuente") == "apertura contra saldo de hoy":
+        ok = cuadre["cuadra"]
+        f_ck = [
+            [f'Saldo de apertura de bancos ({esc(cuadre["origen_apertura"])})',
+             eur(cuadre["saldo_apertura"])],
+            ["Cobros del mes", eur(cuadre["cobros_ejecutados"])],
+            ["Pagos del mes",
+             f'<span class="neg">{eur(cuadre["pagos_ejecutados"])}</span>'],
+            ["<b>Saldo que debería haber hoy</b>",
+             f'<b>{eur(cuadre["saldo_teorico"])}</b>'],
+            ["Saldo que hay hoy en el banco, según Holded",
+             eur(cuadre["saldo_hoy"])],
+            ["<b>Diferencia</b>",
+             f'<b><span class="{"" if ok else "neg"}">'
+             f'{eur(cuadre["diferencia"])}</span></b>'],
+        ]
+        cuadre_html = (
+            f'<div class="nota-cuadre {"ok" if ok else "mal"}">'
+            f'<b>{"CUADRA" if ok else "NO CUADRA"}</b> — '
+            f'{esc(cuadre["explicacion"])} Tolerancia {eur(cuadre["tolerancia"])}.'
+            f'</div>'
+            + tabla(["Concepto", cuadre["etiqueta"]], f_ck,
+                    alineacion=["", "r"],
+                    clases=["", "", "", "sub", "", "total"]))
+        pc = cuadre.get("pdte_conciliar") or []
+        if pc:
+            cuadre_html += (
+                '<h2 style="font-size:15px;margin-top:22px">Lo que Holded tiene '
+                'sin conciliar</h2>'
+                '<p class="h2n">Movimientos que están en el banco pero todavía no '
+                'en la contabilidad. Es la primera explicación de la diferencia '
+                'de arriba, y lo que hay que conciliar para cerrarla.</p>'
+                + tabla(["Cuenta", "Movimientos", "Importe"],
+                        [[esc(x["cuenta"]), f'{x["movimientos"]}', eur(x["importe"])]
+                         for x in pc], alineacion=["", "r", "r"]))
+        nat = cuadre.get("naturaleza") or []
+        if nat:
+            cuadre_html += (
+                '<details><summary>De qué se componen esos cobros y pagos</summary>'
+                + tabla(["Contrapartida", "Importe", "Apuntes"],
+                        [[esc(x["concepto"]),
+                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
+                          f'{eur(x["importe"])}</span>', f'{x["apuntes"]}']
+                         for x in nat], alineacion=["", "r", "r"])
+                + '</details>')
     elif cuadre.get("fuente") == "libro diario":
         # Del diario no sale residuo: cada movimiento lleva su contrapartida en
         # el mismo asiento. En vez de un "no cuadra por X" se enseña de que se
@@ -521,10 +566,22 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         ocultar = meta.get("ocultar_saldo_cero", True)
         vis = b[b["saldo"].abs() > 0.005] if ocultar else b
         n_cero = len(b) - len(vis)
+        # Las tarjetas no le importan a nadie mirando la posicion: van a un
+        # desplegable al pie, no mezcladas con las cuentas.
+        vis_t = vis[vis["tipo"] == "tarjeta"]
+        vis = vis[vis["tipo"] != "tarjeta"]
         f_b = [[esc(r["cuenta"]), NOM_TIPO.get(r["tipo"], "Cuenta"), eur(r["saldo"])]
                for _, r in vis.iterrows()]
         t_ban = tabla(["Cuenta", "Tipo", "Saldo"], f_b) if f_b else \
             '<p class="vacio">Todas las cuentas a cero.</p>'
+        if not vis_t.empty:
+            t_ban += (
+                f'<details><summary>Tarjetas — {eur(float(vis_t["saldo"].sum()))}, '
+                f'se cargan el mes siguiente</summary>'
+                + tabla(["Tarjeta", "Saldo"],
+                        [[esc(r["cuenta"]), eur(r["saldo"])]
+                         for _, r in vis_t.iterrows()], alineacion=["", "r"])
+                + '</details>')
         av = meta.get("aviso_limites")
         if av:
             # Holded no publica limites de credito: el disponible sale de un
@@ -812,14 +869,28 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             [f'Saldo del banco al empezar {esc(m0["etiqueta"])}',
              eur(bk.get("saldo_inicio", 0))],
             ["Saldo del banco hoy", eur(bk.get("saldo_hoy", 0))],
-            ["<b>LEVERED FCF</b> = lo que ha movido la caja",
-             f'<b>{eur(bk.get("levered", 0))}</b>'],
+            ["Variación del saldo bancario",
+             f'<span class="{"neg" if bk.get("variacion_bancos", 0) < 0 else ""}">'
+             f'{eur(bk.get("variacion_bancos", 0))}</span>'],
         ]
+        gm = bk.get("gasto_tarjeta_mes", 0)
+        if abs(gm) > 0.5:
+            f_pu.append([
+                f'Gasto en tarjeta de {esc(m0["etiqueta"])} que no se carga en '
+                f'el banco hasta el mes que viene',
+                f'<span class="{"neg" if gm < 0 else ""}">{eur(gm)}</span>'])
+        f_pu.append(["<b>LEVERED FCF</b>", f'<b>{eur(bk.get("levered", 0))}</b>'])
         for x in eje.get("detalle_deuda") or []:
             f_pu.append([f"&nbsp;&nbsp;<code>{esc(x['cuenta'])}</code> "
                          f"{esc(x['nombre'] or 'deuda')}",
                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
                          f'{eur(x["importe"])}</span>'])
+        gt = bk.get("gasto_tarjetas", 0)
+        if abs(gt) > 0.5:
+            f_pu.append([
+                "<i>Tarjetas, que no son deuda: gasto que vuelca al mes "
+                "siguiente. Se quedan dentro del unlevered</i>",
+                f'<i>{eur(gt)}</i>'])
         f_pu += [
             ["Pagos de deuda del mes (principal, intereses y comisiones)",
              f'<span class="{"neg" if bk.get("deuda", 0) < 0 else ""}">'
@@ -827,11 +898,43 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             ["<b>UNLEVERED FCF</b> = levered − pagos de deuda",
              f'<b>{eur(bk.get("unlevered", 0))}</b>'],
         ]
-        cl_pu = ([""] * 2 + ["sub"]
-                 + [""] * len(eje.get("detalle_deuda") or [])
-                 + ["sub", "total"])
+        n_cab = len(f_pu) - 1          # todo lo anterior al LEVERED
+        n_det = len(eje.get("detalle_deuda") or []) + (
+            1 if abs(bk.get("gasto_tarjetas", 0)) > 0.5 else 0)
+        cl_pu = [""] * n_cab + ["sub"] + [""] * n_det + ["sub", "total"]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
+        # El hueco declarado por Holded entre banco y contabilidad. Cuando el
+        # unlevered no cuadra contra el bottom-up, esto es lo primero que hay
+        # que mirar, y hasta ahora no se veia en ningun sitio.
+        pdte = bk.get("pdte_conciliar") or []
+        if pdte:
+            tot_p = sum(x["importe"] for x in pdte)
+            tot_n = sum(x["movimientos"] for x in pdte)
+            t_puente += (
+                f'<div class="nota-cuadre mal" style="margin-top:14px">'
+                f'<b>HAY {tot_n} MOVIMIENTO{"S" if tot_n != 1 else ""} SIN '
+                f'CONCILIAR EN HOLDED</b> — {eur(tot_p)} en total. Están en el '
+                f'banco pero todavía no en la contabilidad, así que el saldo '
+                f'inicial y los pagos de deuda pueden estar incompletos. '
+                f'Concíliarlos en Holded es lo que cierra la diferencia contra '
+                f'el bottom-up.</div>'
+                + tabla(["Cuenta", "Movimientos", "Importe sin conciliar"],
+                        [[esc(x["cuenta"]), f'{x["movimientos"]}',
+                          eur(x["importe"])] for x in pdte],
+                        alineacion=["", "r", "r"]))
+        des = bk.get("desajuste")
+        if des is not None and abs(des) > 1:
+            t_puente += (
+                f'<div class="nota-cuadre mal" style="margin-top:10px">'
+                f'<b>EL SALDO NO CASA CON LOS MOVIMIENTOS POR {eur(des)}</b> — '
+                f'el saldo contable del día 1 y el de hoy dicen una variación, '
+                f'y sumar los movimientos del banco dice otra. Esa diferencia '
+                f'son movimientos que faltan o que están duplicados.</div>')
+        elif bk.get("origen_inicio"):
+            t_puente += (f'<p class="vacio">Saldo inicial: '
+                         f'{esc(bk["origen_inicio"])}.</p>')
+
         cd = eje.get("contraste_diario")
         if cd is not None:
             ok_cd = abs(cd) <= 1000
@@ -933,9 +1036,22 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                  f'{eur(x["deuda"])}</span>',
                  f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
                  f'{eur(x["unlevered"])}</span></b>'] for x in sb]
+        # El agregado es lo que se compara de verdad contra el bottom-up: un
+        # mes suelto puede irse por un apunte, el acumulado no.
+        f_su.append([
+            f'<b>Acumulado {esc(sb[0]["etiqueta"])} — {esc(sb[-1]["etiqueta"])}</b>',
+            f'<b>{eur(sb[0]["saldo_inicio"])}</b>',
+            f'<b>{eur(sb[-1]["saldo_hoy"])}</b>',
+            f'<b><span class="{"neg" if sum(x["levered"] for x in sb) < 0 else ""}">'
+            f'{eur(sum(x["levered"] for x in sb))}</span></b>',
+            f'<b><span class="{"neg" if sum(x["deuda"] for x in sb) < 0 else ""}">'
+            f'{eur(sum(x["deuda"] for x in sb))}</span></b>',
+            f'<b><span class="{"neg" if sum(x["unlevered"] for x in sb) < 0 else ""}">'
+            f'{eur(sum(x["unlevered"] for x in sb))}</span></b>'])
         t_serie = tabla(["Mes", "Saldo inicial", "Saldo final", "Levered FCF",
                          "Pagos de deuda", "Unlevered FCF"], f_su,
-                        alineacion=["", "r", "r", "r", "r", "r"])
+                        alineacion=["", "r", "r", "r", "r", "r"],
+                        clases=[""] * (len(f_su) - 1) + ["total"])
     elif su:
         f_su = [[esc(x["etiqueta"]), eur(x["variacion_caja"]),
                  f'<span class="{"neg" if x["financiacion"] < 0 else ""}">'
@@ -1084,19 +1200,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             t_ad = tabla(["Partida manual del Excel", "Importe"], f_ad)
         else:
             t_ad = ""
-        contraste_html = f"""
-<section>
-  <h2>Contraste con tu Excel</h2>
-  <p class="h2n">Puente entre lo que calcula el motor y lo que tenias a mano en
-   {esc(ce.get('fichero',''))}. Las diferencias no son errores: son criterios
-   distintos, y aqui quedan explicitos.</p>
-  {t_ce}
-  <h2 style="font-size:15px;margin-top:22px">Lo que en tu Excel metias a mano</h2>
-  <p class="h2n">El motor no puede adivinar tu criterio comercial. Estas partidas
-   van en <code>config.yaml</code> &rarr; <code>cobros.ajustes_positivos</code>
-   y entonces el forecast las recoge sola.</p>
-  {t_ad}
-</section>"""
+        # El contraste contra el Excel se retira: "no va a haber mas Excel".
+        # Era el puente para la transicion y la transicion ya esta hecha.
+        contraste_html = ""
     else:
         contraste_html = ""
 
@@ -1335,15 +1441,6 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
      bottom-up sin discutir una sola cifra: si la diferencia se repite todos los
      meses es un criterio distinto; si sale en uno solo, es un apunte.</p>
     {t_serie}
-  </section>
-
-  <section>
-    <h2>Caja de {etiqueta_m0} por naturaleza contable</h2>
-    <p class="h2n">De qué se compone el movimiento de caja del mes, según la
-     contrapartida de cada asiento en el libro diario. Es lo que convierte una
-     línea de extracto en un concepto: contra 430 es cobro de cliente, contra
-     640 una nómina, contra 520 amortización de deuda.</p>
-    {t_nat}
   </section>
 
   <section>

@@ -165,8 +165,9 @@ def grupo_pgc(cuenta) -> str:
         if c.startswith(pref):
             return nombre
     return f"Grupo {c[:1]}" if c else "Sin cuenta"
-COLS_BANCO = ["cuenta", "saldo", "tipo", "limite"]
-COLS_MOV = ["cuenta", "fecha", "importe", "concepto"]
+COLS_BANCO = ["cuenta", "saldo", "tipo", "limite", "pdte_conciliar"]
+COLS_MOV = ["cuenta", "fecha", "importe", "concepto", "conciliado",
+            "sin_conciliar", "estado"]
 
 
 def clasificar_cuenta(nombre: str, tipo_api: str = "") -> str:
@@ -327,6 +328,11 @@ def desde_holded(ruta: Path) -> dict:
             "saldo": num(_pri(c, "balance", "currentBalance", "currentAmount",
                               "amount", defecto=0)),
             "tipo": clasificar_cuenta(nombre, tipo_api),
+            # lo que Holded tiene sin conciliar en esa cuenta: es el hueco entre
+            # lo que dice el banco y lo que sabe la contabilidad
+            "pdte_conciliar": int(num(_pri(c, "transactions_pending_to_reconcile",
+                                           "transactionsPendingToReconcile",
+                                           defecto=0))),
             # Holded NO publica el limite de la poliza: en el esquema de
             # treasury/accounts no hay ningun campo de limite de credito. Sale
             # de config.yaml, escrito a mano. Cero aqui significa "sin
@@ -417,6 +423,19 @@ def desde_holded(ruta: Path) -> dict:
             "saldo":  num(_pri(c, "balance", "saldo", defecto=0)),
         })
 
+    plan_ini = []
+    for c in d.get("plan_contable_inicio", []) or []:
+        if not isinstance(c, dict):
+            continue
+        plan_ini.append({
+            "numero": str(_pri(c, "number", "num", "code", defecto="")),
+            "nombre": _pri(c, "name", "description", defecto=""),
+            "grupo":  _pri(c, "group", defecto=""),
+            "debe":   num(_pri(c, "debit", "debe", defecto=0)),
+            "haber":  num(_pri(c, "credit", "haber", defecto=0)),
+            "saldo":  num(_pri(c, "balance", "saldo", defecto=0)),
+        })
+
     # ---- libro diario -----------------------------------------------------
     # nombre real de cada cuenta, del plan contable. Sin esto el puente dice
     # "52000042 Deudas a corto con entidades de credito" cuando en realidad es
@@ -449,11 +468,19 @@ def desde_holded(ruta: Path) -> dict:
     for m in d.get("movimientos_tesoreria", []) or []:
         if not isinstance(m, dict):
             continue
+        imp = num(_pri(m, "amount", "value", "total", defecto=0))
+        conc = num(_pri(m, "reconciled_amount", "reconciledAmount", defecto=0))
         movs.append({
             "cuenta": m.get("_cuenta_nombre"),
-            "fecha": a_fecha(_pri(m, "date", "valueDate", "operationDate", "createdAt")),
-            "importe": num(_pri(m, "amount", "value", "total", defecto=0)),
+            "fecha": a_fecha(_pri(m, "date", "value_date", "valueDate",
+                                  "booking_date", "operationDate", "createdAt")),
+            "importe": imp,
             "concepto": _pri(m, "description", "concept", "desc", "notes", defecto=""),
+            "conciliado": conc,
+            # un movimiento sin conciliar esta en el banco pero puede no estar
+            # todavia en la contabilidad, y eso es justo el hueco entre las dos
+            "sin_conciliar": abs(imp) - abs(conc),
+            "estado": str(_pri(m, "status", defecto="")),
         })
 
     sello = meta.get("extraido_en", "?")
@@ -466,6 +493,7 @@ def desde_holded(ruta: Path) -> dict:
         "movimientos": pd.DataFrame(movs, columns=COLS_MOV),
         "realizados": pd.DataFrame(realizados, columns=COLS_REAL),
         "plan_contable": pd.DataFrame(plan, columns=COLS_PLAN),
+        "plan_inicio": pd.DataFrame(plan_ini, columns=COLS_PLAN),
         "diario": pd.DataFrame(diario, columns=COLS_DIARIO),
         "origen": f"API de Holded ({sello})",
         "avisos_origen": meta.get("avisos", []),
@@ -545,6 +573,7 @@ def desde_excel(f_cobros: Path, f_forecast: Path) -> dict:
         # solo existe con la API. Vacio PERO CON COLUMNAS.
         "realizados": pd.DataFrame(columns=COLS_REAL),
         "plan_contable": pd.DataFrame(columns=COLS_PLAN),
+        "plan_inicio": pd.DataFrame(columns=COLS_PLAN),
         "diario": pd.DataFrame(columns=COLS_DIARIO),
         "origen": f"Excel {f_forecast.name}",
     }

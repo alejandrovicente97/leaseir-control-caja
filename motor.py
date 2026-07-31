@@ -31,7 +31,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from fuentes import norm, mes_de, suma_meses, nombre_mes
+from fuentes import norm, mes_de, suma_meses, nombre_mes, clasificar_cuenta
 
 
 def _ejercicio(num, fecha) -> str:
@@ -528,12 +528,24 @@ class MotorCaja:
             return None
 
         cuentas_caja = set(ban[ban["tipo"] == "cuenta"]["cuenta"])
-        m = mov.copy()
-        m = m[m["cuenta"].isin(cuentas_caja)]
+        cuentas_tarj = set(ban[ban["tipo"] == "tarjeta"]["cuenta"])
+        todo = mov.copy()
+        todo["mes"] = todo["fecha"].map(mes_de)
+        m = todo[todo["cuenta"].isin(cuentas_caja)]
         if m.empty:
             return None
-        m["mes"] = m["fecha"].map(mes_de)
         del_mes = m[m["mes"] == mes]
+
+        # EL GASTO EN TARJETA DE ESTE MES NO HA LLEGADO AL BANCO TODAVIA.
+        # Alejandro: "las tarjetas no vuelcan hasta agosto, asi que ese saldo
+        # del banco de hoy no es ok". Y es verdad: la comida, el peaje y el
+        # billete de julio se cargan en la cuenta en agosto, asi que la
+        # variacion de saldo bancario de julio se deja fuera ese gasto y el mes
+        # sale mejor de lo que es. Se suma aparte, con su nombre, para que se
+        # vea que es un ajuste de devengo y no un movimiento de banco.
+        tarj_mes = todo[todo["cuenta"].isin(cuentas_tarj)
+                        & (todo["mes"] == mes)]
+        gasto_tarjeta_mes = float(tarj_mes["importe"].sum()) if not tarj_mes.empty else 0.0
 
         # El saldo de Holded es el de HOY. Para cualquier mes, el saldo con el
         # que empezo se deduce hacia atras quitando todo lo que ha pasado desde
@@ -542,11 +554,50 @@ class MotorCaja:
         variacion = float(del_mes["importe"].sum())
         posterior = float(m[m["mes"] > mes]["importe"].sum())
         saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
-        saldo_inicio = saldo_hoy - variacion
+
+        # EL SALDO INICIAL SALE DE CONTABILIDAD, NO DE RESTAR.
+        # Deducirlo como saldo_hoy - movimientos parecia elegante y es una
+        # trampa: si falta un movimiento, el saldo inicial se mueve en la misma
+        # cantidad, la resta sigue cuadrando y el error se tapa a si mismo. Con
+        # el saldo de las cuentas 57* cerrado a fin del mes anterior son dos
+        # cifras independientes, y lo que no cuadre entre ellas es exactamente
+        # lo que falta. Alejandro lo vio por otro lado: 4 movimientos sin
+        # conciliar en una sola cuenta del BBVA, 108.539,92 euros.
+        pi = self.d.get("plan_inicio")
+        saldo_conta, origen_inicio = None, "deducido de los movimientos"
+        if pi is not None and not pi.empty and mes == self.mes:
+            b57 = pi[pi["numero"].astype(str).str.match(r"^5[74]")]
+            if not b57.empty:
+                saldo_conta = float(b57["saldo"].sum())
+                origen_inicio = "saldo contable de las cuentas 57* a fin del mes anterior"
+        saldo_inicio = saldo_conta if saldo_conta is not None else saldo_hoy - variacion
+        # el hueco entre los dos caminos: si no es cero, faltan movimientos
+        desajuste = (None if saldo_conta is None
+                     else (saldo_hoy - saldo_inicio) - variacion)
+        if saldo_conta is not None:
+            variacion = saldo_hoy - saldo_inicio    # manda el saldo, no la suma
+        variacion_bancos = variacion
+        variacion = variacion + gasto_tarjeta_mes   # devengo de las tarjetas
+
+        # Lo que Holded tiene sin conciliar: el hueco declarado entre banco y
+        # contabilidad. Es la primera explicacion que hay que mirar cuando el
+        # unlevered no cuadra contra el bottom-up.
+        pdte = []
+        if "pdte_conciliar" in ban.columns:
+            for _, r in ban[ban["pdte_conciliar"] > 0].sort_values(
+                    "pdte_conciliar", ascending=False).iterrows():
+                imp = 0.0
+                if "sin_conciliar" in mov.columns:
+                    imp = float(mov[(mov["cuenta"] == r["cuenta"])
+                                    & (mov["sin_conciliar"].abs() > 0.005)]
+                                ["sin_conciliar"].abs().sum())
+                pdte.append({"cuenta": r["cuenta"],
+                             "movimientos": int(r["pdte_conciliar"]),
+                             "importe": imp})
 
         # Pagos de deuda del mes, del libro diario: principal (17*, 52*),
         # intereses y gastos financieros (66*, 527).
-        deuda, det_deuda = 0.0, []
+        deuda, det_deuda, gasto_tarjetas = 0.0, [], 0.0
         dia = self.d.get("diario")
         if dia is not None and not dia.empty:
             d = self._sin_apertura(dia[dia["mes"] == mes])
@@ -564,7 +615,17 @@ class MotorCaja:
             if not c.empty:
                 c["cta"] = c["asiento"].map(lambda a: contra.get(a, ""))
                 c["nom"] = c["asiento"].map(lambda a: nomb.get(a, ""))
-                dd = c[c["cta"].map(lambda x: str(x).startswith(pref))]
+                # Las tarjetas NO son pago de deuda aunque vivan en cuentas 52.
+                # Alejandro: "las tarjetas me dan igual porque vuelcan al mes
+                # siguiente". Es gasto que se liquida con un mes de retraso, no
+                # servicio de deuda, y devolverlo al levered inflaba el
+                # unlevered en 25.022 euros solo en julio.
+                es_deuda = c["cta"].map(lambda x: str(x).startswith(pref))
+                es_tarj = c["nom"].map(
+                    lambda n: clasificar_cuenta(str(n)) == "tarjeta")
+                dd = c[es_deuda & ~es_tarj]
+                tj = c[es_deuda & es_tarj]
+                gasto_tarjetas = float(tj["importe"].sum()) if not tj.empty else 0.0
                 if not dd.empty:
                     deuda = float(dd["importe"].sum())
                     det_deuda = [
@@ -574,10 +635,16 @@ class MotorCaja:
 
         return {
             "mes": mes, "etiqueta": nombre_mes(mes),
+            "origen_inicio": origen_inicio,
+            "desajuste": desajuste,
+            "pdte_conciliar": pdte,
             "saldo_inicio": saldo_inicio,
             "saldo_hoy": saldo_hoy,
+            "variacion_bancos": variacion_bancos,
+            "gasto_tarjeta_mes": gasto_tarjeta_mes,
             "levered": variacion,
             "deuda": deuda,
+            "gasto_tarjetas": gasto_tarjetas,
             "unlevered": variacion - deuda,
             "detalle_deuda": det_deuda,
             "n_movimientos": int(len(del_mes)),
@@ -1120,7 +1187,54 @@ class MotorCaja:
         # Emparejar importes del extracto con liquidaciones de facturas, que es
         # lo que se hacia antes, dejaba 178.000 euros sin explicar por pura
         # construccion: los pagos sin factura no tenian con que casar.
+        # EL CHECK DE VERDAD, que es el que pidio Alejandro:
+        #
+        #   saldo de apertura del banco  +  cobros  +  pagos  =  saldo de hoy
+        #
+        # con los dos extremos sacados de sitios INDEPENDIENTES: la apertura del
+        # saldo contable de las 57* cerrado a fin del mes anterior, y el de hoy
+        # del saldo que da Holded. Si no cuadra, falta algo, y eso es lo unico
+        # que un check debe poder decir.
+        #
+        # Lo que habia antes era saldo inicial + cash in + cash out = saldo
+        # final, con el saldo final calculado como saldo inicial + flujo. Eso
+        # cuadra siempre porque es la misma cuenta escrita dos veces. Alejandro:
+        # "este check es una falacia, lo haces cuadrar tu". Tenia razon.
+        bk = self.fcf_desde_banco(mes)
         nat = self.caja_por_naturaleza(mes)
+        if bk and nat is not None and not nat.empty:
+            filas = [{"concepto": r["naturaleza"], "importe": float(r["importe"]),
+                      "apuntes": int(r["apuntes"])} for _, r in nat.iterrows()]
+            cobros = float(sum(x["importe"] for x in filas if x["importe"] > 0))
+            pagos = float(sum(x["importe"] for x in filas if x["importe"] < 0))
+            teorico = bk["saldo_inicio"] + cobros + pagos
+            dif = teorico - bk["saldo_hoy"]
+            tol = float(self.cfg["cuadre"]["tolerancia_eur"])
+            return {
+                "mes": mes, "etiqueta": nombre_mes(mes),
+                "fuente": "apertura contra saldo de hoy",
+                "saldo_apertura": bk["saldo_inicio"],
+                "origen_apertura": bk.get("origen_inicio", ""),
+                "cobros_ejecutados": cobros,
+                "pagos_ejecutados": pagos,
+                "saldo_teorico": teorico,
+                "saldo_hoy": bk["saldo_hoy"],
+                "diferencia": dif,
+                "cuadra": abs(dif) <= tol,
+                "tolerancia": tol,
+                "naturaleza": filas,
+                "pdte_conciliar": bk.get("pdte_conciliar") or [],
+                "flujo_por_facturas": cobros + pagos,
+                "variacion_bancaria": bk["saldo_hoy"] - bk["saldo_inicio"],
+                "sin_conciliar": [], "resumen_sin_conciliar": [],
+                "importe_sin_conciliar": 0.0, "residuo": dif, "por_cuenta": [],
+                "explicacion": (
+                    "Los dos extremos salen de sitios distintos: la apertura del "
+                    "saldo contable de las cuentas 57* a fin del mes anterior, y "
+                    "el de hoy del saldo que da Holded. Lo que no cuadre entre "
+                    "ellos son movimientos que faltan, no un ajuste de criterio."),
+            }
+
         if nat is not None and not nat.empty:
             variacion = float(nat["importe"].sum())
             filas = [{"concepto": r["naturaleza"], "importe": float(r["importe"]),

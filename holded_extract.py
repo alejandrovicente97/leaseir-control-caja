@@ -69,6 +69,13 @@ RECURSOS_V2 = {
     # cuadrar el pendiente de cobro contra contabilidad: el saldo de las 430*
     # tiene que ser lo exigible hoy mas lo aplazado segun el calendario.
     "plan_contable":   (["accounting-accounts"], False),
+    # El MISMO plan contable pero cerrado a fin del mes anterior. Es lo que da
+    # el saldo de banco con el que empezo el mes sin tener que deducirlo. Y hay
+    # que no deducirlo: si el saldo inicial sale de restar los movimientos al
+    # saldo de hoy, un movimiento que falte mueve el saldo inicial en la misma
+    # cantidad y el error se tapa a si mismo. Con dos saldos independientes, un
+    # movimiento que falta se ve.
+    "plan_contable_inicio": (["accounting-accounts"], False),
     # Libro diario. Dos motivos por los que volvia vacio, y ninguno era que no
     # existiera: la ruta buena es /ledger-entries (no accounting/entries ni
     # dailyledger, que me invente), y start_date y end_date son OBLIGATORIOS.
@@ -111,7 +118,14 @@ def _fin_diario() -> date:
     return date(h.year + (h.month == 12), h.month % 12 + 1, 1) - timedelta(days=1)
 
 
+def _fin_mes_anterior() -> date:
+    h = date.today()
+    return date(h.year, h.month, 1) - timedelta(days=1)
+
+
 PARAMS_V2 = {
+    "plan_contable_inicio": lambda desde, hasta: {
+        "end_date": str(_fin_mes_anterior()), "include_empty": "false"},
     "libro_diario": lambda desde, hasta: {
         "start_date": str(max(desde, _inicio_diario())),
         "end_date": str(min(hasta, _fin_diario())),
