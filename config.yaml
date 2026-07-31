@@ -528,6 +528,32 @@ tesoreria:
   # tu dijiste 24.705. Con el saldo escrito aqui se acaba la discusion, pero
   # OJO: un saldo a mano no se actualiza solo, asi que la fecha de "confirmado"
   # sale en el panel para que se vea cuando envejece.
+  # SALDOS DE APERTURA DEL MES, DEL EXTRACTO, ESCRITOS A MANO.
+  # Son las filas 121-128 de la maestra de Alejandro: el saldo con el que cada
+  # banco EMPEZO el mes, leido del extracto, no deducido. Es la unica manera de
+  # que el levered sea de verdad "saldo final menos saldo inicial": deducir la
+  # apertura restando movimientos se tapa sus propios agujeros, y el filtro de
+  # fecha de Holded esta roto (devuelve el saldo de hoy). Con la apertura
+  # escrita aqui, el descuadre por banco senala EXACTAMENTE donde faltan
+  # movimientos ("sin conciliar o algo", que diria el).
+  #
+  # Valores del 30/06/2026, tomados de su fichero 20260717 - Forecast CashFlow
+  # (filas 121-128). El emparejamiento Santander/BBVA grande-pequena es
+  # deducido: si el descuadre de dos cuentas hermanas sale igual y de signo
+  # contrario, intercambia los dos importes. Cada mes nuevo: actualizar mes y
+  # saldos (un minuto), o dejarlo vacio y se vuelve a deducir con aviso.
+  saldos_apertura:
+    mes: 202607
+    confirmado: "30/06/2026, fichero 20260717 - Forecast CashFlow.xlsx"
+    cuentas:
+      "CUENTA SANTANDER ONE EMPRESAS (2600)": 344818.88
+      "CUENTA SANTANDER ONE EMPRESAS 2031": 67455.22
+      "BBVA- CUENTA CORRIENTE": 114852.76
+      "BBVA (4827)": 74354.22
+      "CAIXABANK (8744)": 24705.90
+      "CAIXA (5388)": 32763.21
+      "CUENTA SABADELL EMPRESAS": 45851.35
+
   saldos_manuales: []
   # saldos_manuales:
   #   - cuenta: "CAIXABANK (8744)"

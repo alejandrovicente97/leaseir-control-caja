@@ -1210,13 +1210,8 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                     '&nbsp;&nbsp;<span class="rojo">Resto sin explicar: '
                     'movimientos que faltan en el diario o en el extracto</span>',
                     f'<span class="rojo">{eur(resto_pu)}</span>'])
-        gm = bk.get("gasto_tarjeta_mes", 0)
-        if abs(gm) > 0.5:
-            f_pu.append([
-                f'Gasto en tarjeta de {esc(m0["etiqueta"])} que no se carga en '
-                f'el banco hasta el mes que viene',
-                f'<span class="{"neg" if gm < 0 else ""}">{eur(gm)}</span>'])
-        f_pu.append(["<b>LEVERED FCF</b>", f'<b>{eur(bk.get("levered", 0))}</b>'])
+        f_pu.append(["<b>LEVERED FCF</b> = variación del saldo bancario",
+                     f'<b>{eur(bk.get("levered", 0))}</b>'])
         for x in eje.get("detalle_deuda") or []:
             f_pu.append([f"&nbsp;&nbsp;<code>{esc(x['cuenta'])}</code> "
                          f"{esc(x['nombre'] or 'deuda')}",
@@ -1239,29 +1234,51 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             1 if abs(bk.get("gasto_tarjetas", 0)) > 0.5 else 0)
         n_cab = len(f_pu) - 3 - n_det  # todo lo anterior al LEVERED
         cl_pu = [""] * n_cab + ["sub"] + [""] * n_det + ["sub", "total"]
-        t_puente = tabla(["Concepto", "Importe"], f_pu,
-                         alineacion=["", "r"], clases=cl_pu)
-        # EL MISMO PUENTE, BANCO A BANCO. Tu bottom-up esta montado asi, de
-        # modo que cuando el total no coincide esto es lo unico que permite ver
-        # que linea se separa sin adivinar donde estan 200.000 euros.
+        gm = bk.get("gasto_tarjeta_mes", 0)
+        nota_tarj = ("" if abs(gm) < 0.5 else
+                     f'<p class="h2n">Aparte, y sin tocar el levered: '
+                     f'{eur(gm)} de gasto en tarjeta de {esc(m0["etiqueta"])} '
+                     f'que el banco no carga hasta el mes que viene.</p>')
+
+        # SU CHECK, BANCO A BANCO, DELANTE. La apertura es la del extracto
+        # escrita a mano; el descuadre de cada banco es (apertura +
+        # movimientos - saldo hoy): donde no sea cero, ahi le faltan
+        # movimientos a Holded. Es la fila K120 de su maestra hecha tabla.
         pc = bk.get("por_cuenta") or []
+        t_bancos = ""
         if pc:
-            f_pc = [[esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
-                     f'<span class="{"neg" if x["variacion"] < 0 else ""}">'
-                     f'{eur(x["variacion"])}</span>', f'{x["n"]}']
-                    for x in pc]
+            con_desc = any(x.get("descuadre") is not None for x in pc)
+            f_pc, cl_pc = [], []
+            for x in pc:
+                d = x.get("descuadre")
+                chip = ""
+                if d is not None and abs(d) > 50:
+                    chip = f'<span class="rojo">{eur(d)}</span>'
+                elif d is not None:
+                    chip = '<span class="chip ok">0</span>'
+                f_pc.append([esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
+                             f'<span class="{"neg" if x["variacion"] < 0 else ""}">'
+                             f'{eur(x["variacion"])}</span>', f'{x["n"]}',
+                             chip if con_desc else ""])
+                cl_pc.append("")
+            tot_d = sum(x["descuadre"] for x in pc
+                        if x.get("descuadre") is not None)
             f_pc.append(["<b>Total</b>",
                          f'<b>{eur(sum(x["inicio"] for x in pc))}</b>',
                          f'<b>{eur(sum(x["hoy"] for x in pc))}</b>',
-                         f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', ""])
-            t_puente += (
-                '<details><summary>Banco a banco, para contrastar con tu '
-                'bottom-up</summary>'
-                + tabla(["Cuenta", "Al empezar el mes", "Hoy", "Variación",
-                         "Movs."], f_pc,
-                        alineacion=["", "r", "r", "r", "r"],
-                        clases=[""] * len(pc) + ["total"])
-                + '</details>')
+                         f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', "",
+                         f'<b>{eur(tot_d)}</b>' if con_desc else ""])
+            cl_pc.append("total")
+            cabs = ["Cuenta", "Inicio (extracto)", "Hoy (Holded)", "Variación",
+                    "Movs."] + (["Descuadre"] if con_desc else [""])
+            t_bancos = tabla(cabs, f_pc,
+                             alineacion=["", "r", "r", "r", "r", "r"],
+                             clases=cl_pc)
+        t_puente = (t_bancos + nota_tarj
+                    + '<h2 style="font-size:15px;margin-top:22px">Y de la '
+                      'variación al unlevered</h2>'
+                    + tabla(["Concepto", "Importe"], f_pu,
+                            alineacion=["", "r"], clases=cl_pu))
         # El hueco declarado por Holded entre banco y contabilidad. Cuando el
         # unlevered no cuadra contra el bottom-up, esto es lo primero que hay
         # que mirar, y hasta ahora no se veia en ningun sitio.
@@ -1896,6 +1913,10 @@ td.cal.sel{{background:#eef4ff}}
 .chip.warn{{background:#fdf1d8;color:#8a5d00}}
 .chip.crit{{background:#fbe6e6;color:#a32020}}
 tr.res td{{background:#fbe6e6}}
+details.aud{{margin:26px 0;border:1px dashed #c7d0d9;border-radius:11px;
+ padding:4px 18px;background:#fbfcfd}}
+details.aud>summary{{cursor:pointer;font-size:14px;font-weight:600;
+ color:#5a6a78;padding:10px 0}}
 .alertas{{list-style:none;margin:0;padding:0}}
 .alertas li{{padding:9px 12px;border-radius:9px;margin-bottom:7px;font-size:14px;
  display:flex;gap:9px;align-items:flex-start}}
@@ -2037,9 +2058,13 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   {t_mes_curso}
 
   <section>
-    <h2>Evolución de la caja</h2>
-    <p class="h2n">Saldo de partida, flujo libre de cada mes y saldo al final del horizonte.</p>
-    {wf}
+    <h2>El check: variación de bancos = cobros + pagos</h2>
+    <p class="h2n">Saldo con el que empezó el mes cada banco (del extracto,
+     escrito a mano en config, como en tu maestra), saldo hoy según Holded, y
+     la variación: eso ES el levered. El <b>descuadre</b> de cada banco es
+     (apertura + movimientos − saldo hoy): si no es cero, ahí es donde Holded
+     se está dejando movimientos — sin conciliar o sin sincronizar.</p>
+    {t_puente}
   </section>
 
   <section>
@@ -2047,42 +2072,13 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
     <p class="h2n">Las líneas con ▸ se abren y enseñan de qué se componen. Los pagos
      a proveedor arrastran los vencidos al mes en curso.</p>
     {tabla_fc}
-    <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
   </section>
 
   <section>
     <h2>Previsiones: lo que de verdad se va a cobrar y pagar</h2>
     <p class="h2n">Correcciones manuales sobre lo que proyecta el motor. Holded
-     no sabe que un cliente no va a pagar este mes; tú sí. Cada corrección se
-     ve con lo que decía el motor y cuánto mueve el forecast.</p>
+     no sabe que un cliente no va a pagar este mes; tú sí.</p>
     {t_prev}
-  </section>
-
-  <section>
-    <h2>Check de caja</h2>
-    <p class="h2n">Saldo inicial + cash in + cash out = saldo final. Cada mes se
-     calcula por separado y se compara: si algo no cuadrase, sería un error del motor,
-     no una diferencia de criterio.</p>
-    {cuadre_proy}
-    <h2 style="font-size:15px;margin-top:24px">Cuadre contra el banco</h2>
-    <p class="h2n">Lo ejecutado del mes contra la variación real de saldo.</p>
-    {cuadre_html}
-  </section>
-
-  <section>
-    <h2>Del banco al unlevered de {etiqueta_m0}</h2>
-    <p class="h2n">Lo que había en el banco el día 1, lo que hay hoy, y la
-     diferencia: eso es el levered. Sumando los pagos de deuda se llega al
-     unlevered. El punto de partida no es un cálculo, son dos saldos.</p>
-    {t_puente}
-  </section>
-
-  <section>
-    <h2>Unlevered ejecutado de los meses cerrados</h2>
-    <p class="h2n">La misma cuenta, mes a mes. Para contrastarlo contra el
-     bottom-up sin discutir una sola cifra: si la diferencia se repite todos los
-     meses es un criterio distinto; si sale en uno solo, es un apunte.</p>
-    {t_serie}
   </section>
 
   <section>
@@ -2090,7 +2086,28 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
     {t_ban}
   </section>
 
+  <details class="aud"><summary>Auditoría: series, cuadres internos y gráficos</summary>
+  <section>
+    <h2>Evolución de la caja</h2>
+    <p class="h2n">Saldo de partida, flujo libre de cada mes y saldo al final del horizonte.</p>
+    {wf}
+    <div style="margin-top:18px">{lg_mes}{barras_mes}</div>
+  </section>
+  <section>
+    <h2>Check de la proyección</h2>
+    <p class="h2n">Saldo inicial + cash in + cash out = saldo final, mes a mes.</p>
+    {cuadre_proy}
+    <h2 style="font-size:15px;margin-top:24px">Cuadre contra el banco</h2>
+    {cuadre_html}
+  </section>
+  <section>
+    <h2>Unlevered ejecutado de los meses cerrados</h2>
+    <p class="h2n">La misma cuenta, mes a mes, para contrastar contra el
+     bottom-up sin discutir una sola cifra.</p>
+    {t_serie}
+  </section>
   {contraste_html}
+  </details>
 
   <section>
     <h2>Calidad del dato</h2>

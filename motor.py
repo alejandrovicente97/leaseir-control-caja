@@ -693,11 +693,27 @@ class MotorCaja:
         # de apertura: es el mismo dato con otro nombre. Un dato que no puede
         # distinguirse del que ya tienes no aporta un contraste, aporta una
         # confirmacion falsa, que es peor que no tener nada.
+        # LA APERTURA BUENA ES LA DE ALEJANDRO: el saldo del extracto a fin del
+        # mes anterior, ESCRITO A MANO en config (tesoreria.saldos_apertura),
+        # que es exactamente lo que hace el en las filas 121-128 de su maestra.
+        # Es el unico dato de apertura fiable que existe: deducirla restando
+        # movimientos se tapa sus propios agujeros, y el filtro de fecha del
+        # plan contable de Holded esta roto (devuelve el saldo de hoy).
+        ap_cfg = (self.cfg.get("tesoreria") or {}).get("saldos_apertura") or {}
+        apert_manual = {}
+        if str(ap_cfg.get("mes") or "") == str(mes):
+            apert_manual = {str(k): float(v)
+                            for k, v in (ap_cfg.get("cuentas") or {}).items()}
+
         pi = self.d.get("plan_inicio")
         pc = self.d.get("plan_contable")
         saldo_conta, origen_inicio = None, "deducido de los movimientos del mes"
         self.aviso_apertura = None
-        if pi is not None and not pi.empty and mes == self.mes:
+        if apert_manual:
+            saldo_conta = float(sum(apert_manual.values()))
+            origen_inicio = (f"extracto bancario, escrito a mano "
+                             f"({ap_cfg.get('confirmado', 'sin fecha')})")
+        elif pi is not None and not pi.empty and mes == self.mes:
             b57 = pi[pi["numero"].astype(str).str.match(PREF_CAJA)]
             hoy57 = (pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
                      if pc is not None and not pc.empty else None)
@@ -707,12 +723,13 @@ class MotorCaja:
                          and abs(cand - float(hoy57["saldo"].sum())) < 0.01)
                 if mismo:
                     self.aviso_apertura = self._avisar(
-                        "Holded ignora el filtro de fecha en el plan contable: "
-                        "el saldo 'a fin del mes anterior' viene identico al de "
-                        "hoy, asi que no sirve como saldo de apertura y no se "
-                        "usa. El saldo de partida se deduce restando los "
-                        "movimientos del mes, que es mas debil: si falta un "
-                        "movimiento, el error se reparte y no se ve.")
+                        "No hay saldos de apertura escritos en config "
+                        "(tesoreria.saldos_apertura) y el filtro de fecha del "
+                        "plan contable de Holded esta roto, asi que el saldo "
+                        "de partida se deduce restando los movimientos del "
+                        "mes: si falta un movimiento, el error se reparte y "
+                        "no se ve. Escribe los saldos del extracto a fin de "
+                        "mes y el check pasa a ser de verdad.")
                 else:
                     saldo_conta = cand
                     origen_inicio = ("saldo contable de las cuentas 57* a fin "
@@ -723,8 +740,41 @@ class MotorCaja:
                      else (saldo_hoy - saldo_inicio) - variacion)
         if saldo_conta is not None:
             variacion = saldo_hoy - saldo_inicio    # manda el saldo, no la suma
+
+        # EL LEVERED ES LA VARIACION DE BANCOS, SIN ADORNOS. El gasto de
+        # tarjeta del mes que vuelca en agosto se informa APARTE: sumarlo al
+        # levered lo convertia en una cifra que no es la de nadie; el modelo
+        # de Alejandro es saldo final menos saldo inicial, punto.
         variacion_bancos = variacion
-        variacion = variacion + gasto_tarjeta_mes   # devengo de las tarjetas
+
+        # el descuadre POR BANCO: (apertura escrita + movimientos) - saldo de
+        # hoy. Si no es cero en una cuenta, ahi es donde Holded se esta
+        # dejando movimientos ("sin conciliar o algo"). Solo existe con
+        # apertura manual: con apertura deducida es cero por construccion.
+        if apert_manual:
+            def _ap(cta):
+                if cta in apert_manual:
+                    return apert_manual[cta]
+                nc = norm(str(cta))
+                for k, v in apert_manual.items():
+                    if norm(k) == nc:
+                        return v
+                return None
+            for x in por_cuenta:
+                a = _ap(x["cuenta"])
+                if a is not None:
+                    x["inicio"] = a
+                    x["descuadre"] = x["hoy"] - a - x["variacion"]
+                else:
+                    x["descuadre"] = None
+            # cuentas con apertura escrita que no aparecen en el listado
+            vistos = {norm(str(x["cuenta"])) for x in por_cuenta}
+            for k, v in apert_manual.items():
+                if norm(k) not in vistos and abs(v) > 0.005:
+                    por_cuenta.append({"cuenta": f"{k} (sin cuenta en Holded)",
+                                       "inicio": v, "hoy": 0.0,
+                                       "variacion": 0.0, "n": 0,
+                                       "descuadre": -v})
 
         # Lo que Holded tiene sin conciliar: el hueco declarado entre banco y
         # contabilidad. Es la primera explicacion que hay que mirar cuando el
