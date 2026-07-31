@@ -1364,27 +1364,34 @@ class MotorCaja:
         # financiacion" y llevaria a decidir sobre un dato inventado.
         pol = b[b["tipo"] == "poliza"] if not b.empty else b
         limites = (self.cfg.get("tesoreria") or {}).get("polizas") or []
-        disp_pol, lim_total, sin_limite = 0.0, 0.0, []
-        # Una poliza con saldo POSITIVO no esta dispuesta: tiene dinero dentro.
-        # La 9418 tiene 971.776 en positivo, el 74% de toda la posicion. Sacarla
-        # de la caja por ser cuenta de credito habria escondido casi un millon
-        # de euros que estan ahi. Se cuenta como caja, pero se dice aparte:
-        # tener el grueso de la tesoreria en una cuenta de credito no es
-        # indiferente y quien lo mira tiene que verlo.
+        disp_pol, lim_total, dispuesto_pol, sin_limite = 0.0, 0.0, 0.0, []
+        # COMO SE LEE EL SALDO DE UNA POLIZA, con los numeros de Alejandro
+        # (31-jul): "las polizas son 600k de Santander + 1,4M con ellos tambien,
+        # estamos usando 428k y tenemos libre 1,57M".
+        #   - saldo NEGATIVO: lo dispuesto. Disponible = limite + saldo.
+        #     La 6575: -1.283 sobre 600.000 -> 598.717 libres.
+        #   - saldo POSITIVO: lo que queda por disponer. Disponible = saldo.
+        #     La 9418: +971.776 sobre 1.400.000 -> dispuesto 428.224.
+        #   Con eso: libre 598.717 + 971.776 = 1.570.493 (su 1,57M) y
+        #   dispuesto 1.283 + 428.224 = 429.507 (su 428k). Cuadra con su Excel.
+        # El saldo positivo NO es caja: es credito sin usar. Ya no se cuenta
+        # aparte como "dinero dentro de la cuenta de credito".
         saldo_en_pol = 0.0
         for _, r in pol.iterrows():
             saldo = float(r["saldo"])
-            dispuesto = -saldo if saldo < 0 else 0.0
             if saldo > 0:
                 saldo_en_pol += saldo
             lim = next((float(x.get("limite") or 0) for x in limites
                         if norm(str(x.get("cuenta", ""))).lower()
                         in norm(str(r["cuenta"])).lower()), 0.0)
             if lim > 0:
+                disponible = saldo if saldo > 0 else lim + saldo
+                disponible = max(0.0, min(disponible, lim))
                 lim_total += lim
-                disp_pol += lim - dispuesto
-            elif dispuesto > 0.005:
-                sin_limite.append(f"{r['cuenta']} (dispuesto {dispuesto:,.0f})"
+                disp_pol += disponible
+                dispuesto_pol += lim - disponible
+            elif abs(saldo) > 0.005:
+                sin_limite.append(f"{r['cuenta']} (saldo {saldo:,.0f})"
                                   .replace(",", " "))
         self.polizas_sin_limite = sin_limite
 
@@ -1477,6 +1484,7 @@ class MotorCaja:
             "ejecutado": eje,
             "fijos_pagados": pagado,
             "polizas_limite": lim_total, "polizas_sin_limite": sin_limite,
+            "polizas_dispuesto": dispuesto_pol,
             "saldo_en_polizas": saldo_en_pol, "deuda_tarjetas": deuda_tarjetas,
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
             "saldo_tesoreria": self.saldo_tesoreria,
@@ -1567,7 +1575,27 @@ class MotorCaja:
             teorico = bk["saldo_inicio"] + cobros + pagos
             dif = teorico - bk["saldo_hoy"]
             tol = float(self.cfg["cuadre"]["tolerancia_eur"])
+
+            # LO PENDIENTE DE CONCILIAR CIERRA EL CUADRE, CON SIGNO.
+            # Alejandro: "con los cobros y pagos del libro diario de julio
+            # deberia ser facil, y lo pendiente de conciliar que ves en Holded.
+            # Son numeros". Exacto: el banco y la contabilidad se diferencian
+            # en los movimientos que estan en el extracto y todavia no
+            # apuntados. Contabilidad + pendiente = banco. Lo que quede
+            # despues de sumar el pendiente es descuadre DE VERDAD.
+            mv, ban2 = self.d.get("movimientos"), self.d.get("bancos")
+            pend_neto = 0.0
+            if (mv is not None and not mv.empty
+                    and "sin_conciliar" in mv.columns
+                    and ban2 is not None and not ban2.empty):
+                ctas = set(ban2[ban2["tipo"] == "cuenta"]["cuenta"])
+                pend_neto = float(mv[mv["cuenta"].isin(ctas)]
+                                  ["sin_conciliar"].sum())
+            resto = dif + pend_neto
             return {
+                "pendiente_neto": pend_neto,
+                "resto_conciliar": resto,
+                "cuadra_conciliado": abs(resto) <= tol,
                 "mes": mes, "etiqueta": nombre_mes(mes),
                 "fuente": "apertura contra saldo de hoy",
                 "saldo_apertura": bk["saldo_inicio"],

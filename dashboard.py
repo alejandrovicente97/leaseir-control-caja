@@ -10,12 +10,13 @@
 """
 from __future__ import annotations
 
+import calendar as _callib
 import html
 import json
 import os
 
 from fuentes import nombre_mes
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 try:
     from zoneinfo import ZoneInfo
@@ -294,17 +295,13 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # saberlo.
     sin_lim = fc.get("polizas_sin_limite") or []
     if fc.get("polizas_limite"):
-        nota_pol = (f"+ {eur(fc['polizas_disponible'])} disponible en pólizas "
-                    f"sobre {eur(fc['polizas_limite'])} de límite")
+        nota_pol = (f"pólizas: {eur(fc['polizas_disponible'])} libres · "
+                    f"dispuesto {eur(fc.get('polizas_dispuesto') or 0)} de "
+                    f"{eur(fc['polizas_limite'])}")
     elif sin_lim:
         nota_pol = f"pólizas: {esc(', '.join(sin_lim))}, límite sin configurar"
     else:
         nota_pol = "sin pólizas"
-    # Tener el grueso de la tesoreria dentro de una cuenta de credito no es
-    # indiferente: se cuenta como caja pero se dice.
-    if fc.get("saldo_en_polizas", 0) > 0.5:
-        nota_pol += (f" · {eur(fc['saldo_en_polizas'])} en cuenta de crédito, "
-                     f"fuera de caja")
 
     # si el saldo contable y el listado de tesoreria no dicen lo mismo, se
     # avisa: una cuenta que figura a cero en el listado y tiene dinero dentro
@@ -462,29 +459,36 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                 ["Diferencia", "<i>—</i>"],
             ]))
     elif cuadre.get("fuente") == "apertura contra saldo de hoy":
-        ok = cuadre["cuadra"]
+        # El check completo: contabilidad + pendiente de conciliar = banco.
+        # La diferencia bruta NO es el veredicto; el veredicto es lo que queda
+        # despues de sumar el pendiente, que es descuadre de verdad.
+        ok = cuadre.get("cuadra_conciliado", cuadre["cuadra"])
+        pn = cuadre.get("pendiente_neto", 0.0)
+        resto = cuadre.get("resto_conciliar", cuadre["diferencia"])
         f_ck = [
             [f'Saldo de apertura de bancos ({esc(cuadre["origen_apertura"])})',
              eur(cuadre["saldo_apertura"])],
-            ["Cobros del mes", eur(cuadre["cobros_ejecutados"])],
-            ["Pagos del mes",
+            ["Cobros del mes (libro diario)", eur(cuadre["cobros_ejecutados"])],
+            ["Pagos del mes (libro diario)",
              f'<span class="neg">{eur(cuadre["pagos_ejecutados"])}</span>'],
-            ["<b>Saldo que debería haber hoy</b>",
+            ["<b>Saldo según contabilidad</b>",
              f'<b>{eur(cuadre["saldo_teorico"])}</b>'],
             ["Saldo que hay hoy en el banco, según Holded",
              eur(cuadre["saldo_hoy"])],
-            ["<b>Diferencia</b>",
-             f'<b><span class="{"" if ok else "neg"}">'
-             f'{eur(cuadre["diferencia"])}</span></b>'],
+            ["Diferencia contabilidad − banco", eur(cuadre["diferencia"])],
+            ["Pendiente de conciliar en el extracto (con signo)", eur(pn)],
+            ["<b>Resto sin explicar</b>",
+             f'<b><span class="{"" if ok else "neg"}">{eur(resto)}</span></b>'],
         ]
         cuadre_html = (
             f'<div class="nota-cuadre {"ok" if ok else "mal"}">'
-            f'<b>{"CUADRA" if ok else "NO CUADRA"}</b> — '
-            f'{esc(cuadre["explicacion"])} Tolerancia {eur(cuadre["tolerancia"])}.'
+            f'<b>{"CUADRA" if ok else "NO CUADRA"}</b> — contabilidad más lo '
+            f'pendiente de conciliar {"explica" if ok else "NO explica"} el '
+            f'saldo del banco. Tolerancia {eur(cuadre["tolerancia"])}.'
             f'</div>'
             + tabla(["Concepto", cuadre["etiqueta"]], f_ck,
                     alineacion=["", "r"],
-                    clases=["", "", "", "sub", "", "total"]))
+                    clases=["", "", "", "sub", "", "", "", "total"]))
         pc = cuadre.get("pdte_conciliar") or []
         if pc:
             cuadre_html += (
@@ -971,10 +975,31 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             [f'Saldo del banco al empezar {esc(m0["etiqueta"])}',
              eur(bk.get("saldo_inicio", 0))],
             ["Saldo del banco hoy", eur(bk.get("saldo_hoy", 0))],
-            ["Variación del saldo bancario",
-             f'<span class="{"neg" if bk.get("variacion_bancos", 0) < 0 else ""}">'
-             f'{eur(bk.get("variacion_bancos", 0))}</span>'],
+            ["<b>Variación del saldo bancario</b>",
+             f'<b><span class="{"neg" if bk.get("variacion_bancos", 0) < 0 else ""}">'
+             f'{eur(bk.get("variacion_bancos", 0))}</span></b>'],
         ]
+        # De donde sale esa variacion: cobros y pagos del libro diario mas lo
+        # pendiente de conciliar, CON SIGNO. Son numeros, y tienen que cerrar:
+        # contabilidad + pendiente = banco. Si queda resto, se dice en rojo.
+        if cuadre and cuadre.get("pendiente_neto") is not None:
+            c_dia = cuadre.get("cobros_ejecutados", 0)
+            p_dia = cuadre.get("pagos_ejecutados", 0)
+            pn = cuadre.get("pendiente_neto", 0)
+            resto_pu = bk.get("variacion_bancos", 0) - (c_dia + p_dia) - pn
+            f_pu += [
+                [f'&nbsp;&nbsp;Cobros de {esc(m0["etiqueta"])} (libro diario)',
+                 eur(c_dia)],
+                [f'&nbsp;&nbsp;Pagos de {esc(m0["etiqueta"])} (libro diario)',
+                 f'<span class="neg">{eur(p_dia)}</span>'],
+                ['&nbsp;&nbsp;Pendiente de conciliar en el extracto (con signo)',
+                 eur(pn)],
+            ]
+            if abs(resto_pu) > cuadre.get("tolerancia", 1):
+                f_pu.append([
+                    '&nbsp;&nbsp;<span class="rojo">Resto sin explicar: '
+                    'movimientos que faltan en el diario o en el extracto</span>',
+                    f'<span class="rojo">{eur(resto_pu)}</span>'])
         gm = bk.get("gasto_tarjeta_mes", 0)
         if abs(gm) > 0.5:
             f_pu.append([
@@ -1000,9 +1025,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             ["<b>UNLEVERED FCF</b> = levered − pagos de deuda",
              f'<b>{eur(bk.get("unlevered", 0))}</b>'],
         ]
-        n_cab = len(f_pu) - 1          # todo lo anterior al LEVERED
         n_det = len(eje.get("detalle_deuda") or []) + (
             1 if abs(bk.get("gasto_tarjetas", 0)) > 0.5 else 0)
+        n_cab = len(f_pu) - 3 - n_det  # todo lo anterior al LEVERED
         cl_pu = [""] * n_cab + ["sub"] + [""] * n_det + ["sub", "total"]
         t_puente = tabla(["Concepto", "Importe"], f_pu,
                          alineacion=["", "r"], clases=cl_pu)
@@ -1194,60 +1219,83 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
 
     # ---- KPIs de las pestanas de cobros y pagos --------------------------
-    n_cli = int((cli["pendiente_cobro"].abs() > 0.01).sum()) if not cli.empty else 0
+    # Los tres estados que pide Alejandro, como en su fichero de cobros:
+    # COBRADO, VENCIDO (deberia estar cobrado segun Eli y no lo esta) y
+    # PENDIENTE SIN VENCER (facturado, con la cuota todavia por delante).
     cob_mes = float(cli["cuota_mes"].sum()) if not cli.empty else 0.0
-    top_cli = (cli.iloc[0]["cliente"], cli.iloc[0]["pendiente_cobro"]) if not cli.empty else ("—", 0)
+    dc0 = fc.get("detalle_cobros")
+    e_cob = None
+    tot_cobrado = tot_vencido = tot_sinv = cobrado_mes = 0.0
+    if dc0 is not None and not dc0.empty:
+        e_cob = dc0.copy()
+        e_cob["cobrado"] = e_cob["liquidado"]
+        e_cob["vencido_i"] = (e_cob["teorico_hoy"] - e_cob["liquidado"]).clip(lower=0)
+        e_cob["sin_vencer"] = (e_cob["total"]
+                               - e_cob[["teorico_hoy", "liquidado"]].max(axis=1)
+                               ).clip(lower=0)
+        tot_cobrado = float(e_cob["cobrado"].sum())
+        tot_vencido = float(e_cob["vencido_i"].sum())
+        tot_sinv = float(e_cob["sin_vencer"].sum())
+    rea0 = meta.get("realizados")
+    if rea0 is not None and not rea0.empty:
+        cobrado_mes = float(rea0[rea0["sentido"] == "cobro"]["importe"].sum())
     kpis_cob = "".join([
-        kpi("Pendiente de cobro exigible", eur(pend_cobro), f"{n_cli} clientes"),
-        kpi("En retraso", eur(retraso),
-            f"{retraso / pend_cobro:.0%} del exigible" if pend_cobro else "—",
-            "aviso" if retraso > 300_000 else ""),
-        kpi(f"Cuota teórica de {m0['etiqueta']}", eur(cob_mes), "según calendario de Eli"),
-        kpi("Mayor riesgo", eur(top_cli[1]), esc(top_cli[0])[:34]),
+        kpi("Cobrado", eur(tot_cobrado),
+            f"{eur(cobrado_mes)} en {m0['etiqueta']}", "ok"),
+        kpi("Pendiente vencido", eur(tot_vencido),
+            "debería estar cobrado según Eli y no lo está",
+            "aviso" if tot_vencido > 300_000 else ""),
+        kpi("Pendiente sin vencer", eur(tot_sinv),
+            "facturado, con la cuota aún por delante"),
+        kpi(f"Cuota teórica de {m0['etiqueta']}", eur(cob_mes),
+            "según calendario de Eli"),
     ])
 
     n_prov = int((prov["pendiente_total"].abs() > 0.01).sum()) if not prov.empty else 0
     n_venc = int((prov["vencido"] > 0.01).sum()) if not prov.empty else 0
     pend_prov = float(prov["pendiente_total"].sum()) if not prov.empty else 0.0
-    no_holded = m0["salarios"] + m0["cuotas_sl"] + m0["recurrentes_proyectados"] + m0["otros_fijos"]
+    pagado_mes = 0.0
+    if rea0 is not None and not rea0.empty:
+        pagado_mes = float(rea0[rea0["sentido"] == "pago"]["importe"].sum())
     kpis_pag = "".join([
-        kpi("Pendiente a proveedores", eur(-pend_prov), f"{n_prov} proveedores"),
+        kpi(f"Pagado en {m0['etiqueta']}", eur(pagado_mes),
+            "apuntes de liquidación ligados a factura"),
         kpi("Vencido y sin pagar", eur(-vencido), f"{n_venc} proveedores",
             "aviso" if vencido > 200_000 else ""),
+        kpi("Pendiente sin vencer", eur(-(pend_prov - vencido)),
+            "facturado, con el vencimiento por delante"),
         kpi(f"Pago previsto {m0['etiqueta']}", eur(m0["pago_proveedores"]),
             "vencimientos hasta fin de mes"),
-        kpi("Fuera de Holded", eur(no_holded),
-            "salarios, cuotas S&L y recurrentes"),
     ])
 
-    # ---- detalle factura a factura ---------------------------------------
-    dc = fc.get("detalle_cobros")
+    # ---- detalle factura a factura, como el fichero de cobros ------------
+    # Cada factura cruzada con lo que Eli dice que deberia llevar cobrado.
+    # La diferencia es lo VENCIDO; el resto del importe, pendiente SIN VENCER.
+    # Sin columnas de teoricos futuros: eso ya lo cuenta el forecast.
     grupos_cob = []
-    if dc is not None and not dc.empty:
-        act = dc[(dc["pendiente_cobro"].abs() > 0.01) |
-                 (dc[[f"teorico_{m}" for m in meses[1:]]].abs().sum(axis=1) > 0.01)]
+    if e_cob is not None and not e_cob.empty:
+        act = e_cob[(e_cob["vencido_i"] > 0.01) | (e_cob["sin_vencer"] > 0.01)]
         for cliente, g in act.groupby("cliente"):
-            g = g.sort_values("pendiente_cobro", ascending=False)
-            pend, ret = g["pendiente_cobro"].sum(), g["retraso"].sum()
-            resumen = (f'<b>{eur(pend)}</b> exigible'
-                       + (f' · <span class="rojo">{eur(ret)} en retraso</span>' if ret > 0.01 else ''))
-            filas = [[esc(r["num"]), esc(r["cuenta"])[:42],
-                      esc(r["vencimiento"] or "—"), eur(r["total"]),
-                      eur(r["teorico_hoy"]), eur(r["liquidado"]),
-                      eur(r["pendiente_cobro"]),
-                      (f'<span class="chip crit">{eur(r["retraso"])}</span>' if r["retraso"] > 0.01
-                       else '<span class="chip ok">al día</span>')]
-                     + [eur(r[f"teorico_{m}"]) for m in meses[1:]]
+            g = g.sort_values("vencido_i", ascending=False)
+            venc, sinv = g["vencido_i"].sum(), g["sin_vencer"].sum()
+            resumen = ((f'<span class="rojo"><b>{eur(venc)}</b> vencido</span>'
+                        if venc > 0.01 else '<span class="chip ok">al día</span>')
+                       + (f' · {eur(sinv)} sin vencer' if sinv > 0.01 else ''))
+            filas = [[esc(r["num"]), esc(str(r["vencimiento"] or "—")),
+                      eur(r["total"]), eur(r["teorico_hoy"]),
+                      eur(r["cobrado"]),
+                      (f'<span class="rojo"><b>{eur(r["vencido_i"])}</b></span>'
+                       if r["vencido_i"] > 0.01 else "—"),
+                      eur(r["sin_vencer"]) if r["sin_vencer"] > 0.01 else "—"]
                      for _, r in g.iterrows()]
             grupos_cob.append((cliente, resumen, filas))
-        grupos_cob.sort(key=lambda x: -sum(float(str(f[6]).replace(" ", "").replace("€", "").replace("—", "0") or 0)
-                                           for f in x[2]) if False else 0)
         grupos_cob = sorted(
             grupos_cob,
-            key=lambda x: -act[act["cliente"] == x[0]]["pendiente_cobro"].sum())
-    cab_cob = (["Factura", "Concepto", "Vencimiento", "Importe", "Teórico hoy",
-                "Cobrado", "Exigible", "Retraso"] + [f"Teórico {e}" for e in etiquetas[1:]])
+            key=lambda x: -act[act["cliente"] == x[0]]["vencido_i"].sum())
+    cab_cob = ["Factura", "Vencimiento", "Total", "Debería cobrado (Eli)",
+               "Cobrado", "Vencido", "Sin vencer"]
     det_cobros = detalle_desplegable(grupos_cob, cab_cob,
+                                     alineacion=["", "", "r", "r", "r", "r", "r"],
                                      vacio="Sin cobros pendientes.")
 
     dp = fc.get("detalle_pagos")
@@ -1272,6 +1320,73 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                "Importe", "Pagado", "Pendiente", "Estado"]
     det_pagos = detalle_desplegable(grupos_pag, cab_pag,
                                     vacio="Sin pagos pendientes.")
+
+    # ---- calendario de pagos del mes -------------------------------------
+    # Lo que pide Alejandro: ver COMO EN UN CALENDARIO que dias pago y que
+    # facturas, y que vence cada dia. Un dia con movimiento se pincha y ensena
+    # sus facturas debajo; nada de listas kilometricas.
+    y_cal, m_cal = int(meses[0][:4]), int(meses[0][4:])
+    pag_dia, ven_dia = {}, {}
+    if rea is not None and not rea.empty:
+        for _, r in rea[rea["sentido"] == "pago"].iterrows():
+            f = r["fecha"]
+            if getattr(f, "year", None) == y_cal and f.month == m_cal:
+                pag_dia.setdefault(f.day, []).append(
+                    (str(r["tercero"]), str(r["num"] or r["concepto"] or "")[:36],
+                     float(r["importe"])))
+    ven_antes = 0.0
+    if dp is not None and not dp.empty:
+        for _, r in dp[dp["pendiente"] > 0.01].iterrows():
+            v = r["vencimiento"]
+            if not v or not hasattr(v, "year"):
+                continue
+            if (v.year, v.month) == (y_cal, m_cal):
+                ven_dia.setdefault(v.day, []).append(
+                    (str(r["proveedor"]), str(r["num"])[:36], float(r["pendiente"])))
+            elif v < date(y_cal, m_cal, 1):
+                ven_antes += float(r["pendiente"])
+
+    _hoy = date.today()
+    hoy_d = _hoy.day if (_hoy.year, _hoy.month) == (y_cal, m_cal) else None
+    celdas, cal_dets = [], []
+    for semana in _callib.Calendar(firstweekday=0).monthdayscalendar(y_cal, m_cal):
+        fila = []
+        for d in semana:
+            if d == 0:
+                fila.append('<td class="cal off"></td>')
+                continue
+            p = sum(x[2] for x in pag_dia.get(d, []))
+            v = sum(x[2] for x in ven_dia.get(d, []))
+            cls = "cal" + (" tiene" if (pag_dia.get(d) or ven_dia.get(d)) else "") \
+                  + (" hoy" if d == hoy_d else "")
+            cuerpo = f'<div class="cal-num">{d}</div>'
+            if abs(p) > 0.005:
+                cuerpo += f'<div class="cal-p">{eur(p)}</div>'
+            if v > 0.005:
+                cuerpo += f'<div class="cal-v">vence {eur(v)}</div>'
+            clic = f' onclick="caldia({d})"' if (pag_dia.get(d) or ven_dia.get(d)) else ""
+            fila.append(f'<td id="calc{d}" class="{cls}"{clic}>{cuerpo}</td>')
+            if pag_dia.get(d) or ven_dia.get(d):
+                filas_d = ([[esc(t), esc(n), "pagado",
+                             f'<span class="neg">{eur(i)}</span>']
+                            for t, n, i in sorted(pag_dia.get(d, []), key=lambda x: x[2])]
+                           + [[esc(t), esc(n), "vence", eur(i)]
+                              for t, n, i in sorted(ven_dia.get(d, []),
+                                                    key=lambda x: -x[2])])
+                cal_dets.append(
+                    f'<div id="cald{d}" class="cal-det" hidden>'
+                    f'<h2 style="font-size:14px;margin:14px 0 6px">'
+                    f'Día {d} de {esc(m0["etiqueta"])}</h2>'
+                    + tabla(["Tercero", "Factura", "", "Importe"], filas_d,
+                            alineacion=["", "", "", "r"]) + '</div>')
+        celdas.append("<tr>" + "".join(fila) + "</tr>")
+    cal_html = ('<table class="calend"><thead><tr>'
+                + "".join(f"<th>{x}</th>" for x in
+                          ["L", "M", "X", "J", "V", "S", "D"])
+                + '</tr></thead><tbody>' + "".join(celdas) + '</tbody></table>')
+    cal_dets_html = "".join(cal_dets)
+    nota_ven_antes = (f' Arrastrado de meses anteriores y aún sin pagar: '
+                      f'<b>{eur(-ven_antes)}</b>.' if ven_antes > 0.01 else "")
 
     cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
     # Aviso a toda pantalla si los datos de origen no son creibles. Un fallo
@@ -1388,6 +1503,18 @@ tr.total td .neg{{color:#ffc9c9}}
 tbody tr:hover td{{background:#f7f9fa}}
 tr.sub:hover td,tr.total:hover td{{background:inherit}}
 .b{{font-weight:650}} .neg{{color:{P['crit']}}}
+.calend{{width:100%;table-layout:fixed;border-collapse:collapse;margin-top:6px}}
+.calend th{{font-size:11px;color:#8a94a6;text-align:left;padding:2px 6px;border:none}}
+td.cal{{border:1px solid #e8ecf1;vertical-align:top;height:58px;padding:4px 6px;
+ font-size:12px;background:#fff}}
+td.cal.off{{background:#fafbfc;border-color:#f0f2f5}}
+td.cal.tiene{{cursor:pointer}}
+td.cal.tiene:hover{{background:#f4f7fb}}
+td.cal.hoy{{outline:2px solid {P['brand']};outline-offset:-2px}}
+td.cal.sel{{background:#eef4ff}}
+.cal-num{{font-weight:700;color:#8a94a6;font-size:11px}}
+.cal-p{{color:{P['crit']};font-weight:700;white-space:nowrap}}
+.cal-v{{color:#8a5d00;white-space:nowrap}}
 .chip{{display:inline-block;padding:1px 8px;border-radius:20px;font-size:12px;font-weight:600}}
 .chip.ok{{background:#e6f5e6;color:{P['up']}}}
 .chip.warn{{background:#fdf1d8;color:#8a5d00}}
@@ -1643,13 +1770,18 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   </section>
 
   <section>
-    <h2>Pagos ya realizados en {etiqueta_m0}</h2>
-    <p class="h2n">Lo que ha salido de verdad entre el día 1 y hoy, apunte a apunte
-     y ligado a su factura. Total {tot_pag_hechos} en {n_pag_hechos} apunte{s_pag}.</p>
-    <div class="buscador">
-      <input type="text" id="bph" placeholder="Filtrar proveedor…" oninput="filtrar('p3h', this.value)">
-    </div>
-    <div id="p3h" class="detalles">{det_pag_hechos}</div>
+    <h2>Calendario de pagos de {etiqueta_m0}</h2>
+    <p class="h2n">En rojo lo pagado cada día; en ámbar lo que vence y sigue sin
+     pagar. Pincha un día para ver sus facturas.{nota_ven_antes}</p>
+    {cal_html}
+    {cal_dets_html}
+    <details><summary>Todos los apuntes de pago del mes — {tot_pag_hechos} en
+     {n_pag_hechos} apunte{s_pag}</summary>
+      <div class="buscador">
+        <input type="text" id="bph" placeholder="Filtrar proveedor…" oninput="filtrar('p3h', this.value)">
+      </div>
+      <div id="p3h" class="detalles">{det_pag_hechos}</div>
+    </details>
   </section>
 
   <section>
@@ -1736,6 +1868,17 @@ function filtrar(id, q) {{
     var n = d.querySelector('.t-nom').textContent.toLowerCase();
     d.style.display = n.indexOf(t) === -1 ? 'none' : '';
   }});
+}}
+function caldia(d) {{
+  var det = document.getElementById('cald' + d);
+  var abierto = det && !det.hidden;
+  document.querySelectorAll('.cal-det').forEach(function (x) {{ x.hidden = true; }});
+  document.querySelectorAll('td.cal.sel').forEach(function (x) {{ x.classList.remove('sel'); }});
+  if (det && !abierto) {{
+    det.hidden = false;
+    var c = document.getElementById('calc' + d);
+    if (c) c.classList.add('sel');
+  }}
 }}
 </script>
 </body></html>"""
