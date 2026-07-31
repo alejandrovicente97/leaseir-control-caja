@@ -309,11 +309,15 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # si el saldo contable y el listado de tesoreria no dicen lo mismo, se
     # avisa: una cuenta que figura a cero en el listado y tiene dinero dentro
     # es exactamente lo que paso con la segunda cuenta de Caixa
-    dif_teso = fc.get("dif_tesoreria")
-    if dif_teso is not None and abs(dif_teso) > 1:
-        sentido = "menos" if dif_teso > 0 else "más"
-        nota_pol += (f" · sale de contabilidad (cuentas 57*): el listado de "
-                     f"cuentas de Holded suma {eur(abs(dif_teso))} {sentido}")
+    # Cuántas cuentas del listado no tienen saldo pero sí cuenta contable con
+    # movimiento: es la forma de que la cuenta de Caixa que falta se anuncie
+    # sola en vez de descubrirse restando totales.
+    huecos = [c for c in (fc.get("conciliacion_caja") or [])
+              if c.get("listado") is None and abs(c.get("conta") or 0) > 1]
+    if huecos:
+        nota_pol += (f" · ojo: {len(huecos)} cuenta{'s' if len(huecos) != 1 else ''} "
+                     f"contable{'s' if len(huecos) != 1 else ''} de tesorería "
+                     f"sin cuenta detrás en el listado de Holded")
 
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
@@ -610,21 +614,39 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # La lista de tesoreria de Holded daba una de las dos cuentas de Caixa a
     # cero y la posicion salia 23.806 corta. Con el desglose delante, decir
     # que linea sobra o falta es mirar, no deducir.
-    cajac = fc.get("caja_contable") or []
-    if cajac:
+    conc = fc.get("conciliacion_caja") or []
+    if conc:
+        f_c = []
+        for c in sorted(conc, key=lambda x: -(abs(x.get("listado") or 0)
+                                              + abs(x.get("conta") or 0))):
+            marca = ""
+            if c.get("listado") is None:
+                marca = ' <span class="chip crit">sin cuenta en Holded</span>'
+            elif abs(c["listado"]) < 0.01 and abs(c.get("conta") or 0) > 1:
+                marca = ' <span class="chip crit">a cero en el listado</span>'
+            f_c.append([esc(c["num"]) or "—", esc(c["cuenta"]) + marca,
+                        "—" if c.get("listado") is None else eur(c["listado"]),
+                        "—" if c.get("conta") is None else eur(c["conta"]),
+                        "—" if c.get("conta_dh") is None else eur(c["conta_dh"])])
+        tot_l = sum(c["listado"] for c in conc if c.get("listado") is not None)
+        tot_c = sum(c["conta"] for c in conc if c.get("conta") is not None)
+        tot_d = sum(c["conta_dh"] for c in conc if c.get("conta_dh") is not None)
+        f_c.append(["<b>Total</b>", "", f"<b>{eur(tot_l)}</b>",
+                    f"<b>{eur(tot_c)}</b>", f"<b>{eur(tot_d)}</b>"])
         t_ban += (
-            f'<details><summary>De dónde sale la posición — {len(cajac)} '
-            f'cuenta{"s" if len(cajac) != 1 else ""} contable'
-            f'{"s" if len(cajac) != 1 else ""} de tesorería</summary>'
-            '<p class="h2n">Suma de los saldos de las cuentas 57* del plan '
-            'contable. Las pólizas y las tarjetas son cuentas 52* y por eso no '
-            'están aquí. Si sobra o falta una línea, dilo y se ajusta.</p>'
-            + tabla(["Cuenta", "Nombre", "Saldo"],
-                    [[esc(c["numero"]), esc(c["nombre"]), eur(c["saldo"])]
-                     for c in cajac]
-                    + [["<b>Total</b>", "",
-                        f'<b>{eur(sum(c["saldo"] for c in cajac))}</b>']],
-                    alineacion=["", "", "r"])
+            '<details><summary>Contraste con contabilidad — de dónde sale la '
+            'posición y qué no cuadra</summary>'
+            '<p class="h2n">Cada cuenta de tesorería frente a su cuenta '
+            'contable, enlazadas por el número de cuenta que da el propio '
+            'Holded, no por el nombre. La posición de arriba es la columna '
+            '<b>Listado</b>. Las dos columnas de contabilidad están para ver '
+            'cuál de las dos —si alguna— dice la verdad: el campo <i>balance</i> '
+            'de la API da bancos en negativo y cuentas espejo, así que hoy no '
+            'se usa para nada. Lo que sí importa: si una cuenta sale marcada, '
+            'ahí está el dinero que falta en la posición.</p>'
+            + tabla(["Cuenta contable", "Cuenta", "Listado", "Contab. (balance)",
+                     "Contab. (debe−haber)"], f_c,
+                    alineacion=["", "", "r", "r", "r"])
             + '</details>')
 
     # ---- cobros y pagos YA REALIZADOS del mes -----------------------------

@@ -165,7 +165,7 @@ def grupo_pgc(cuenta) -> str:
         if c.startswith(pref):
             return nombre
     return f"Grupo {c[:1]}" if c else "Sin cuenta"
-COLS_BANCO = ["cuenta", "saldo", "tipo", "limite", "pdte_conciliar"]
+COLS_BANCO = ["cuenta", "saldo", "tipo", "limite", "pdte_conciliar", "cta_conta"]
 COLS_MOV = ["cuenta", "fecha", "importe", "concepto", "conciliado",
             "sin_conciliar", "estado"]
 
@@ -339,6 +339,12 @@ def desde_holded(ruta: Path) -> dict:
             # configurar", no "sin disponible": son cosas muy distintas y el
             # dashboard las distingue.
             "limite": 0.0,
+            # El numero de cuenta contable con el que Holded enlaza cada cuenta
+            # de tesoreria. Es lo unico que permite contrastar el listado de
+            # bancos contra el mayor sin emparejar por nombre, que es como se
+            # perdio una cuenta de Caixa: en el listado figura a cero.
+            "cta_conta": str(_pri(c, "accounting_account_number",
+                                  "accountingAccountNumber", defecto="") or ""),
         })
 
     # ---- cobros y pagos REALIZADOS ---------------------------------------

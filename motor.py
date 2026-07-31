@@ -473,6 +473,12 @@ class MotorCaja:
             f"cuentas): es el saldo que venia del ano anterior, no un flujo.")
         return m[~m["asiento"].isin(apertura)]
 
+    def _avisar(self, texto: str) -> str:
+        """Deja el aviso en la lista de calidad del dato y lo devuelve."""
+        if texto not in self.avisos:
+            self.avisos.append(texto)
+        return texto
+
     def caja_por_naturaleza(self, mes: str | None = None) -> pd.DataFrame:
         """
         Los movimientos de caja del mes, clasificados por su contrapartida.
@@ -559,33 +565,53 @@ class MotorCaja:
         # El saldo de Holded es el de HOY. Para cualquier mes, el saldo con el
         # que empezo se deduce hacia atras quitando todo lo que ha pasado desde
         # entonces: no hace falta guardar historico de saldos.
-        pc_hoy = self.d.get("plan_contable")
-        hoy_total = None
-        if pc_hoy is not None and not pc_hoy.empty:
-            c57h = pc_hoy[pc_hoy["numero"].astype(str).str.match(PREF_CAJA)]
-            if not c57h.empty:
-                hoy_total = float(c57h["saldo"].sum())
-        if hoy_total is None:
-            hoy_total = float(ban[ban["tipo"] == "cuenta"]["saldo"].sum())
+        hoy_total = float(ban[ban["tipo"] == "cuenta"]["saldo"].sum())
         variacion = float(del_mes["importe"].sum())
         posterior = float(m[m["mes"] > mes]["importe"].sum())
         saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
 
-        # EL SALDO INICIAL SALE DE CONTABILIDAD, NO DE RESTAR.
-        # Deducirlo como saldo_hoy - movimientos parecia elegante y es una
-        # trampa: si falta un movimiento, el saldo inicial se mueve en la misma
-        # cantidad, la resta sigue cuadrando y el error se tapa a si mismo. Con
-        # el saldo de las cuentas 57* cerrado a fin del mes anterior son dos
-        # cifras independientes, y lo que no cuadre entre ellas es exactamente
-        # lo que falta. Alejandro lo vio por otro lado: 4 movimientos sin
-        # conciliar en una sola cuenta del BBVA, 108.539,92 euros.
+        # EL SALDO INICIAL DEBERIA SALIR DE CONTABILIDAD, NO DE RESTAR.
+        # Deducirlo como saldo_hoy - movimientos es una trampa: si falta un
+        # movimiento, el saldo inicial se mueve en la misma cantidad, la resta
+        # sigue cuadrando y el error se tapa a si mismo. Por eso se pide el
+        # saldo de las cuentas 57* cerrado a fin del mes anterior: dos cifras
+        # independientes, y lo que no cuadre entre ellas es lo que falta.
+        #
+        # PERO HAY QUE COMPROBAR QUE HOLDED HA HECHO CASO A LA FECHA. No lo
+        # hace: /accounting-accounts devuelve exactamente lo mismo con end_date
+        # que sin el. Se vio porque las dos llamadas daban el mismo total al
+        # euro, -2.997.589, y el puente publico un levered de +3,3 millones en
+        # julio dando por bueno ese numero como saldo de apertura.
+        #
+        # Asi que el saldo contable solo manda si demuestra ser de otra fecha.
+        # Si coincide con el de hoy, el filtro se ha ignorado y no es un saldo
+        # de apertura: es el mismo dato con otro nombre. Un dato que no puede
+        # distinguirse del que ya tienes no aporta un contraste, aporta una
+        # confirmacion falsa, que es peor que no tener nada.
         pi = self.d.get("plan_inicio")
-        saldo_conta, origen_inicio = None, "deducido de los movimientos"
+        pc = self.d.get("plan_contable")
+        saldo_conta, origen_inicio = None, "deducido de los movimientos del mes"
+        self.aviso_apertura = None
         if pi is not None and not pi.empty and mes == self.mes:
             b57 = pi[pi["numero"].astype(str).str.match(PREF_CAJA)]
+            hoy57 = (pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
+                     if pc is not None and not pc.empty else None)
             if not b57.empty:
-                saldo_conta = float(b57["saldo"].sum())
-                origen_inicio = "saldo contable de las cuentas 57* a fin del mes anterior"
+                cand = float(b57["saldo"].sum())
+                mismo = (hoy57 is not None and not hoy57.empty
+                         and abs(cand - float(hoy57["saldo"].sum())) < 0.01)
+                if mismo:
+                    self.aviso_apertura = self._avisar(
+                        "Holded ignora el filtro de fecha en el plan contable: "
+                        "el saldo 'a fin del mes anterior' viene identico al de "
+                        "hoy, asi que no sirve como saldo de apertura y no se "
+                        "usa. El saldo de partida se deduce restando los "
+                        "movimientos del mes, que es mas debil: si falta un "
+                        "movimiento, el error se reparte y no se ve.")
+                else:
+                    saldo_conta = cand
+                    origen_inicio = ("saldo contable de las cuentas 57* a fin "
+                                     "del mes anterior")
         saldo_inicio = saldo_conta if saldo_conta is not None else saldo_hoy - variacion
         # el hueco entre los dos caminos: si no es cero, faltan movimientos
         desajuste = (None if saldo_conta is None
@@ -1033,23 +1059,63 @@ class MotorCaja:
         # tambien, asi que quedan fuera por definicion contable y no porque yo
         # acierte a reconocerlas por el nombre. Adivinar por el nombre funciona
         # hasta que alguien abre una cuenta que se llama distinto.
+        # LA POSICION ES LA DEL LISTADO DE TESORERIA. Se probo sacarla del plan
+        # contable sumando las cuentas 57*, y el resultado publicado fue
+        # -2.997.589 euros contra los 358.864 del listado. O sea que el saldo
+        # que devuelve /accounting-accounts no es el saldo a fecha de hoy de esa
+        # cuenta: hay cuentas espejo (dos "Caja, euros" con +9.405 y -9.405) y
+        # bancos en negativo que en el banco tienen dinero. Hasta saber que
+        # mide exactamente ese campo, no manda sobre la posicion.
+        #
+        # Lo que si se hace es CONTRASTAR las dos fuentes cuenta a cuenta y
+        # publicar el contraste, porque el problema de origen sigue ahi: hay
+        # una segunda cuenta de Caixa con 24.705 euros que en el listado de
+        # tesoreria figura a cero, y por eso la posicion sale 23.806 corta
+        # contra los 382.670,40 de Alejandro. El enlace es el numero de cuenta
+        # contable que trae el propio listado, no el nombre.
         pc = self.d.get("plan_contable")
         self.saldo_tesoreria = saldo_cta
         self.saldo_conta_hoy = None
-        caja_conta = []
+        caja_conta, concilia = [], []
         if pc is not None and not pc.empty:
             c57 = pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
             if not c57.empty:
+                dh = (c57["debe"].fillna(0) - c57["haber"].fillna(0)
+                      if {"debe", "haber"} <= set(c57.columns)
+                      else c57["saldo"] * 0)
                 self.saldo_conta_hoy = float(c57["saldo"].sum())
-                saldo_cta = self.saldo_conta_hoy
-                # Cuenta a cuenta, para que la posicion se pueda auditar de un
-                # vistazo. Si sobra o falta una linea se ve aqui y no hay que
-                # deducirlo de un total que no cuadra por 24.705 euros.
+                self.saldo_conta_dh = float(dh.sum())
                 caja_conta = [
                     {"numero": str(r["numero"]), "nombre": r.get("nombre", ""),
-                     "saldo": float(r["saldo"])}
-                    for _, r in c57.sort_values("saldo", ascending=False).iterrows()
-                    if abs(float(r["saldo"])) > 0.005]
+                     "saldo": float(r["saldo"]),
+                     "debe_haber": float((r.get("debe") or 0) - (r.get("haber") or 0))}
+                    for _, r in c57.iterrows()
+                    if abs(float(r["saldo"])) > 0.005
+                    or abs(float((r.get("debe") or 0) - (r.get("haber") or 0))) > 0.005]
+                caja_conta.sort(key=lambda x: -x["saldo"])
+
+                # Contraste cuenta a cuenta por numero de cuenta contable.
+                por_num = {c["numero"]: c for c in caja_conta}
+                vistos = set()
+                if "cta_conta" in b.columns:
+                    for _, r in b[b["tipo"] == "cuenta"].iterrows():
+                        num = str(r.get("cta_conta") or "")
+                        cc = por_num.get(num)
+                        if cc:
+                            vistos.add(num)
+                        concilia.append({
+                            "cuenta": r["cuenta"], "num": num,
+                            "listado": float(r["saldo"]),
+                            "conta": None if not cc else cc["saldo"],
+                            "conta_dh": None if not cc else cc["debe_haber"]})
+                # cuentas contables de tesoreria sin ninguna cuenta de Holded
+                # detras: son las candidatas a ser la que falta
+                for c in caja_conta:
+                    if c["numero"] not in vistos:
+                        concilia.append({
+                            "cuenta": f"(sin cuenta en el listado) {c['nombre']}",
+                            "num": c["numero"], "listado": None,
+                            "conta": c["saldo"], "conta_dh": c["debe_haber"]})
 
         # POLIZAS. El saldo que da Holded es lo DISPUESTO, en negativo. El
         # disponible es limite - dispuesto, y el limite no lo publica la API:
@@ -1175,6 +1241,8 @@ class MotorCaja:
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
             "saldo_tesoreria": self.saldo_tesoreria,
             "caja_contable": caja_conta,
+            "conciliacion_caja": concilia,
+            "saldo_conta_dh": getattr(self, "saldo_conta_dh", None),
             "dif_tesoreria": (None if self.saldo_conta_hoy is None
                               else self.saldo_conta_hoy - self.saldo_tesoreria),
             "detalle": {"salarios": sal_det, "cuotas_sl": sl_det,
