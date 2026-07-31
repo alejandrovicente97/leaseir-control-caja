@@ -33,6 +33,15 @@ import pandas as pd
 
 from fuentes import norm, mes_de, suma_meses, nombre_mes, clasificar_cuenta
 
+# Que cuentas del plan son CAJA. Grupo 57 es tesoreria (570 caja, 572 bancos,
+# 576 inversiones de gran liquidez) y 54 recoge imposiciones a corto que en
+# esta casa se manejan como disponible. Las polizas y las tarjetas son 52*, asi
+# que quedan fuera por definicion contable y no porque yo acierte a
+# reconocerlas por el nombre. Esta escrito una sola vez a proposito: el saldo
+# de apertura, el de hoy y las lineas de movimiento tienen que mirar
+# exactamente el mismo conjunto de cuentas o el puente deja de ser un puente.
+PREF_CAJA = r"^5[74]"
+
 
 def _ejercicio(num, fecha) -> str:
     """
@@ -484,7 +493,7 @@ class MotorCaja:
         if m.empty:
             return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
 
-        es_caja = m["cuenta"].astype(str).str.match(r"^5[74]")
+        es_caja = m["cuenta"].astype(str).str.match(PREF_CAJA)
         caja, resto = m[es_caja], m[~es_caja]
         if caja.empty:
             return pd.DataFrame(columns=["naturaleza", "importe", "apuntes"])
@@ -550,7 +559,14 @@ class MotorCaja:
         # El saldo de Holded es el de HOY. Para cualquier mes, el saldo con el
         # que empezo se deduce hacia atras quitando todo lo que ha pasado desde
         # entonces: no hace falta guardar historico de saldos.
-        hoy_total = float(ban[ban["tipo"] == "cuenta"]["saldo"].sum())
+        pc_hoy = self.d.get("plan_contable")
+        hoy_total = None
+        if pc_hoy is not None and not pc_hoy.empty:
+            c57h = pc_hoy[pc_hoy["numero"].astype(str).str.match(PREF_CAJA)]
+            if not c57h.empty:
+                hoy_total = float(c57h["saldo"].sum())
+        if hoy_total is None:
+            hoy_total = float(ban[ban["tipo"] == "cuenta"]["saldo"].sum())
         variacion = float(del_mes["importe"].sum())
         posterior = float(m[m["mes"] > mes]["importe"].sum())
         saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
@@ -566,7 +582,7 @@ class MotorCaja:
         pi = self.d.get("plan_inicio")
         saldo_conta, origen_inicio = None, "deducido de los movimientos"
         if pi is not None and not pi.empty and mes == self.mes:
-            b57 = pi[pi["numero"].astype(str).str.match(r"^5[74]")]
+            b57 = pi[pi["numero"].astype(str).str.match(PREF_CAJA)]
             if not b57.empty:
                 saldo_conta = float(b57["saldo"].sum())
                 origen_inicio = "saldo contable de las cuentas 57* a fin del mes anterior"
@@ -601,8 +617,8 @@ class MotorCaja:
         dia = self.d.get("diario")
         if dia is not None and not dia.empty:
             d = self._sin_apertura(dia[dia["mes"] == mes])
-            caja = d[d["cuenta"].astype(str).str.match(r"^5[74]")]
-            resto = d[~d["cuenta"].astype(str).str.match(r"^5[74]")]
+            caja = d[d["cuenta"].astype(str).str.match(PREF_CAJA)]
+            resto = d[~d["cuenta"].astype(str).str.match(PREF_CAJA)]
             pref = tuple(str(x) for x in
                          (self.cfg.get("cuadre") or {}).get("cuentas_deuda")
                          or ["17", "52", "527", "66"])
@@ -676,7 +692,7 @@ class MotorCaja:
         m = self._sin_apertura(dia[dia["mes"] == (mes or self.mes)])
         if m.empty:
             return None
-        es_caja = m["cuenta"].astype(str).str.match(r"^5[74]")
+        es_caja = m["cuenta"].astype(str).str.match(PREF_CAJA)
         caja, resto = m[es_caja], m[~es_caja]
         if caja.empty:
             return None
@@ -1008,6 +1024,33 @@ class MotorCaja:
         b = self.d["bancos"]
         saldo_cta = float(b[b["tipo"] == "cuenta"]["saldo"].sum()) if not b.empty else 0.0
 
+        # LA POSICION SALE DE CONTABILIDAD, NO DE LA LISTA DE CUENTAS.
+        # Faltaba una segunda cuenta de Caixa con 24.705 euros: en el listado de
+        # tesoreria de Holded figura con saldo cero, y sumando esa lista la
+        # posicion salia 358.864 cuando son 382.670. Sumando las cuentas 57* del
+        # plan contable el problema desaparece, y ademas desaparece por el
+        # motivo correcto: en el plan, las polizas son 52* y las tarjetas
+        # tambien, asi que quedan fuera por definicion contable y no porque yo
+        # acierte a reconocerlas por el nombre. Adivinar por el nombre funciona
+        # hasta que alguien abre una cuenta que se llama distinto.
+        pc = self.d.get("plan_contable")
+        self.saldo_tesoreria = saldo_cta
+        self.saldo_conta_hoy = None
+        caja_conta = []
+        if pc is not None and not pc.empty:
+            c57 = pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
+            if not c57.empty:
+                self.saldo_conta_hoy = float(c57["saldo"].sum())
+                saldo_cta = self.saldo_conta_hoy
+                # Cuenta a cuenta, para que la posicion se pueda auditar de un
+                # vistazo. Si sobra o falta una linea se ve aqui y no hay que
+                # deducirlo de un total que no cuadra por 24.705 euros.
+                caja_conta = [
+                    {"numero": str(r["numero"]), "nombre": r.get("nombre", ""),
+                     "saldo": float(r["saldo"])}
+                    for _, r in c57.sort_values("saldo", ascending=False).iterrows()
+                    if abs(float(r["saldo"])) > 0.005]
+
         # POLIZAS. El saldo que da Holded es lo DISPUESTO, en negativo. El
         # disponible es limite - dispuesto, y el limite no lo publica la API:
         # sale de config.yaml. Sin limite configurado el disponible es
@@ -1130,6 +1173,10 @@ class MotorCaja:
             "polizas_limite": lim_total, "polizas_sin_limite": sin_limite,
             "saldo_en_polizas": saldo_en_pol, "deuda_tarjetas": deuda_tarjetas,
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
+            "saldo_tesoreria": self.saldo_tesoreria,
+            "caja_contable": caja_conta,
+            "dif_tesoreria": (None if self.saldo_conta_hoy is None
+                              else self.saldo_conta_hoy - self.saldo_tesoreria),
             "detalle": {"salarios": sal_det, "cuotas_sl": sl_det,
                         "sin_facturar": cob_cfg.get("sin_facturar") or [],
                         "ajustes": ((cob_cfg.get("ajustes_negativos") or [])

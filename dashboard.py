@@ -306,6 +306,15 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         nota_pol += (f" · además {eur(fc['saldo_en_polizas'])} dentro de la "
                      f"cuenta de crédito, que no cuenta como caja")
 
+    # si el saldo contable y el listado de tesoreria no dicen lo mismo, se
+    # avisa: una cuenta que figura a cero en el listado y tiene dinero dentro
+    # es exactamente lo que paso con la segunda cuenta de Caixa
+    dif_teso = fc.get("dif_tesoreria")
+    if dif_teso is not None and abs(dif_teso) > 1:
+        sentido = "menos" if dif_teso > 0 else "más"
+        nota_pol += (f" · sale de contabilidad (cuentas 57*): el listado de "
+                     f"cuentas de Holded suma {eur(abs(dif_teso))} {sentido}")
+
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
         kpi(f"Levered FCF {m0['etiqueta']} · lo que llevamos",
@@ -596,6 +605,27 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                       f'un saldo negativo en tarjeta es deuda a pagar.</p>')
     else:
         t_ban = '<p class="vacio">Sin cuentas.</p>'
+
+    # De donde sale exactamente la posicion, cuenta contable a cuenta contable.
+    # La lista de tesoreria de Holded daba una de las dos cuentas de Caixa a
+    # cero y la posicion salia 23.806 corta. Con el desglose delante, decir
+    # que linea sobra o falta es mirar, no deducir.
+    cajac = fc.get("caja_contable") or []
+    if cajac:
+        t_ban += (
+            f'<details><summary>De dónde sale la posición — {len(cajac)} '
+            f'cuenta{"s" if len(cajac) != 1 else ""} contable'
+            f'{"s" if len(cajac) != 1 else ""} de tesorería</summary>'
+            '<p class="h2n">Suma de los saldos de las cuentas 57* del plan '
+            'contable. Las pólizas y las tarjetas son cuentas 52* y por eso no '
+            'están aquí. Si sobra o falta una línea, dilo y se ajusta.</p>'
+            + tabla(["Cuenta", "Nombre", "Saldo"],
+                    [[esc(c["numero"]), esc(c["nombre"]), eur(c["saldo"])]
+                     for c in cajac]
+                    + [["<b>Total</b>", "",
+                        f'<b>{eur(sum(c["saldo"] for c in cajac))}</b>']],
+                    alineacion=["", "", "r"])
+            + '</details>')
 
     # ---- cobros y pagos YA REALIZADOS del mes -----------------------------
     # Sale de /payments, el libro de liquidaciones de Holded: cada apunte lleva
