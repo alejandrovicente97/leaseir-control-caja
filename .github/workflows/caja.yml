@@ -85,28 +85,39 @@ jobs:
         run: |
           git config user.name  "Motor de caja Leaseir"
           git config user.email "actions@leaseir.com"
-          mkdir -p historico
-          cp publicado/index.html "historico/caja_$(date +%Y%m%d).html"
-          # GitHub Pages sirve desde la raiz de main
-          cp publicado/index.html index.html
-          git add -f publicado/index.html historico/ index.html
-          # esquema, rutas y conteos de la API: sin datos de negocio, sirve para
-          # diagnosticar la extraccion sin depender del log de Actions
-          git add -f diagnostico/holded.json || true
-          git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
-          # Si alguien ha empujado a main mientras corria la extraccion -tres
-          # minutos son de sobra-, el push se rechaza y el run entero sale en
-          # rojo con el dashboard ya calculado. Se reintenta reintegrando lo
-          # que haya llegado. --rebase porque lo nuestro es un commit de salida
-          # que va encima de lo que haya, nunca al reves.
+          # El resultado del run se guarda FUERA del repo antes de tocar git.
+          # Si el push choca con otro run (paso con el 44 programado contra el
+          # 45 manual), NO se rebasa: dos dashboards generados del mismo dia
+          # siempre chocan y el rebase muere -"el rebase no ha podido
+          # resolverse solo"-. Lo correcto es resetear a lo ultimo publicado y
+          # reaplicar NUESTRO resultado encima: el dashboard mas reciente
+          # manda, que es exactamente lo que significa un dashboard.
+          cp publicado/index.html "$RUNNER_TEMP/index.html"
+          cp diagnostico/holded.json "$RUNNER_TEMP/holded.json" 2>/dev/null || true
+          publicar() {
+            mkdir -p historico publicado diagnostico
+            cp "$RUNNER_TEMP/index.html" publicado/index.html
+            cp "$RUNNER_TEMP/index.html" "historico/caja_$(date +%Y%m%d).html"
+            # GitHub Pages sirve desde la raiz de main
+            cp "$RUNNER_TEMP/index.html" index.html
+            git add -f publicado/index.html historico/ index.html
+            # esquema, rutas y conteos de la API: sin datos de negocio, sirve
+            # para diagnosticar la extraccion sin depender del log de Actions
+            if [ -f "$RUNNER_TEMP/holded.json" ]; then
+              cp "$RUNNER_TEMP/holded.json" diagnostico/holded.json
+              git add -f diagnostico/holded.json
+            fi
+            git diff --cached --quiet || git commit -m "Caja al $(date +%d/%m/%Y)"
+          }
+          publicar
           for intento in 1 2 3 4 5; do
             if git push; then
               echo "publicado en el intento $intento"; exit 0
             fi
-            echo "::warning::push rechazado (intento $intento), reintegrando main"
-            git pull --rebase --autostash origin main || {
-              echo "::error::el rebase no ha podido resolverse solo"; exit 1
-            }
+            echo "::warning::push rechazado (intento $intento), reaplicando encima de lo ultimo"
+            git fetch origin main
+            git reset --hard origin/main
+            publicar
             sleep $((intento * 3))
           done
           echo "::error::no se ha podido publicar tras 5 intentos"; exit 1
