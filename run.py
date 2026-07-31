@@ -151,8 +151,12 @@ def main() -> None:
             "realizados": m.realizados_mes(),
             "check_clientes": m.check_clientes(),
             "cobrabilidad": m.cobrabilidad(),
-            "mapping_cobros": (cal.attrs.get("mapping_simple") or {}
-                               if hasattr(cal, "attrs") else {}),
+            # el corte por linea de negocio: manda la hoja Mapping del Sheet de
+            # Eli si llega; si no, el snapshot de config (cliente -> linea,
+            # cruzado de su propio Control de cobros)
+            "mapping_cobros": ((cal.attrs.get("mapping_simple") or {}
+                                if hasattr(cal, "attrs") else {})
+                               or cfg["cobros"].get("mapping_comercial") or {}),
             "certidumbre": cfg.get("certidumbre") or {},
             "polizas_limites": (cfg.get("tesoreria") or {}).get("polizas") or [],
             # YTD para el Visual Nacho: los meses cerrados del ano en curso
