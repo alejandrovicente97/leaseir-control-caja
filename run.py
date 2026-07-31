@@ -151,6 +151,15 @@ def main() -> None:
             "realizados": m.realizados_mes(),
             "check_clientes": m.check_clientes(),
             "cobrabilidad": m.cobrabilidad(),
+            "mapping_cobros": (cal.attrs.get("mapping_simple") or {}
+                               if hasattr(cal, "attrs") else {}),
+            "certidumbre": cfg.get("certidumbre") or {},
+            "polizas_limites": (cfg.get("tesoreria") or {}).get("polizas") or [],
+            # YTD para el Visual Nacho: los meses cerrados del ano en curso
+            "unlevered_ytd": sum(
+                x.get("unlevered", 0) or 0
+                for x in m.serie_unlevered(11)
+                if str(x.get("mes", ""))[:4] == (args.mes or f"{date.today():%Y%m}")[:4]),
             "mes_en_curso": m.mes_en_curso(fc),
             "caja_naturaleza": m.caja_por_naturaleza(),
             "serie_unlevered": m.serie_unlevered(6),

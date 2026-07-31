@@ -635,6 +635,14 @@ def calendario_cobros(ruta: Path, hoja: str = "ELISABET") -> pd.DataFrame:
     wb.close()
     df = pd.DataFrame(registros, columns=["factura", "cliente", "mes", "importe"])
     df.attrs["facturas_en_hoja"] = presentes
+    # El mapping cliente -> categoria comercial vive en la hoja "Mapping" del
+    # MISMO libro (Control de cobros). Se cuelga del calendario para que el
+    # Excel generado pueda hacer el pivot por comercial sin abrir otro fichero.
+    try:
+        _, simple = mapping_cuentas(ruta)
+        df.attrs["mapping_simple"] = simple
+    except Exception:
+        df.attrs["mapping_simple"] = {}
     return df
 
 
