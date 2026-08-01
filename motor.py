@@ -549,6 +549,41 @@ class MotorCaja:
         return {str(k): float(v)
                 for k, v in ap.groupby("cuenta")["importe"].sum().items()}
 
+    def _saldos_contables_57(self, mes: str) -> dict:
+        """
+        El saldo de cada cuenta de caja segun CONTABILIDAD, en dos cortes:
+        fin del mes anterior y hoy. Sale de sumar el asiento de apertura de
+        enero mas el libro diario, cuenta a cuenta.
+
+        Es la unica foto con fecha de verdad que existe en este sistema: los
+        saldos del listado de tesoreria de Holded los rellena Alejandro A
+        MANO (los ultimos, el 17/07, de vuelta de vacaciones), asi que no
+        son "hoy" ni "fin de mes": son "el dia que los toco". Usarlos como
+        foto fechada es fabricar un check que cuadra con el dia equivocado.
+        """
+        dia = self.d.get("diario")
+        if dia is None or dia.empty:
+            return {}
+        apert = self._apertura_por_cuenta()
+        m = self._sin_apertura(dia)
+        c57 = m[m["cuenta"].astype(str).str.match(PREF_CAJA)]
+        nombres = {}
+        if "cuenta_nombre" in c57.columns:
+            nombres = {str(k): str(v) for k, v in
+                       c57.groupby("cuenta")["cuenta_nombre"].last().items()}
+        prev = c57[c57["mes"] < mes].groupby("cuenta")["importe"].sum()
+        mes_v = c57[c57["mes"] == mes].groupby("cuenta")["importe"].sum()
+        salida = {}
+        for cta in set(apert) | set(str(x) for x in prev.index) | \
+                set(str(x) for x in mes_v.index):
+            a = apert.get(str(cta), 0.0)
+            p = float(prev.get(cta, prev.get(str(cta), 0.0)) or 0.0)
+            v = float(mes_v.get(cta, mes_v.get(str(cta), 0.0)) or 0.0)
+            salida[str(cta)] = {"nombre": nombres.get(str(cta), ""),
+                                "inicio": a + p, "hoy": a + p + v,
+                                "variacion": v}
+        return salida
+
     def _avisar(self, texto: str) -> str:
         """Deja el aviso en la lista de calidad del dato y lo devuelve."""
         if texto not in self.avisos:
@@ -645,136 +680,108 @@ class MotorCaja:
         # si el puente partiera del listado en bruto y el KPI del listado
         # corregido, los 24.705 de la cuenta de Caixa que Holded declara a cero
         # apareceria como flujo del mes en vez de como saldo que ya estaba.
-        cc = self._conciliar_caja()
-        hoy_total = cc["saldo"]
         variacion = float(del_mes["importe"].sum())
 
-        # EL MISMO PUENTE, CUENTA A CUENTA.
-        # El bottom-up de Alejandro esta montado banco a banco, asi que cuando
-        # el total no coincide lo unico util es poder poner las dos columnas al
-        # lado y ver que linea se separa. Dar solo el total obliga a adivinar
-        # donde estan 200.000 euros de diferencia.
-        saldo_hoy_cta = dict(zip(ban[ban["tipo"] == "cuenta"]["cuenta"],
-                                 ban[ban["tipo"] == "cuenta"]["saldo"]))
-        for c in cc.get("conciliacion") or []:      # la cuenta reconstruida
-            if c.get("rescatada"):
-                saldo_hoy_cta[c["cuenta"]] = c["estimado"]
-        var_cta = del_mes.groupby("cuenta")["importe"].sum().to_dict()
-        post_cta = (m[m["mes"] > mes].groupby("cuenta")["importe"].sum().to_dict()
-                    if not m[m["mes"] > mes].empty else {})
-        por_cuenta = []
-        for cta, hoy in saldo_hoy_cta.items():
-            v = float(var_cta.get(cta, 0.0))
-            fin = float(hoy) - float(post_cta.get(cta, 0.0))
-            if abs(fin) < 0.005 and abs(v) < 0.005:
-                continue
-            por_cuenta.append({"cuenta": cta, "inicio": fin - v,
-                               "hoy": fin, "variacion": v,
-                               "n": int((del_mes["cuenta"] == cta).sum())})
-        por_cuenta.sort(key=lambda x: x["variacion"])
-        posterior = float(m[m["mes"] > mes]["importe"].sum())
-        saldo_hoy = hoy_total - posterior          # saldo al cierre de ese mes
+        # LA POSICION, EN LOS DOS CORTES, SALE DE CONTABILIDAD.
+        # Ni los saldos del listado de Holded ni las aperturas del Excel de
+        # Alejandro son fotos fechadas: los rellena el A MANO (los ultimos,
+        # el 17/07, de vuelta de vacaciones). Lo unico de este sistema que
+        # lleva fecha de verdad es el libro diario: asiento de apertura de
+        # enero mas movimientos. De ahi salen el saldo a fin del mes anterior
+        # y el de hoy, cuenta a cuenta, y el levered es su diferencia. El
+        # saldo que declara Holded se ensena AL LADO, como declaracion manual,
+        # nunca dentro de la cuenta.
+        conta = self._saldos_contables_57(mes)
+        mapa_teso = {}
+        listado_saldo = {}
+        if not ban.empty:
+            if "cta_conta" in ban.columns:
+                mapa_teso = {str(r["cta_conta"]): r["cuenta"]
+                             for _, r in ban.iterrows() if r.get("cta_conta")}
+            b_c = ban[ban["tipo"] == "cuenta"]
+            listado_saldo = dict(zip(b_c["cuenta"], b_c["saldo"]))
 
-        # EL SALDO INICIAL DEBERIA SALIR DE CONTABILIDAD, NO DE RESTAR.
-        # Deducirlo como saldo_hoy - movimientos es una trampa: si falta un
-        # movimiento, el saldo inicial se mueve en la misma cantidad, la resta
-        # sigue cuadrando y el error se tapa a si mismo. Por eso se pide el
-        # saldo de las cuentas 57* cerrado a fin del mes anterior: dos cifras
-        # independientes, y lo que no cuadre entre ellas es lo que falta.
-        #
-        # PERO HAY QUE COMPROBAR QUE HOLDED HA HECHO CASO A LA FECHA. No lo
-        # hace: /accounting-accounts devuelve exactamente lo mismo con end_date
-        # que sin el. Se vio porque las dos llamadas daban el mismo total al
-        # euro, -2.997.589, y el puente publico un levered de +3,3 millones en
-        # julio dando por bueno ese numero como saldo de apertura.
-        #
-        # Asi que el saldo contable solo manda si demuestra ser de otra fecha.
-        # Si coincide con el de hoy, el filtro se ha ignorado y no es un saldo
-        # de apertura: es el mismo dato con otro nombre. Un dato que no puede
-        # distinguirse del que ya tienes no aporta un contraste, aporta una
-        # confirmacion falsa, que es peor que no tener nada.
-        # LA APERTURA BUENA ES LA DE ALEJANDRO: el saldo del extracto a fin del
-        # mes anterior, ESCRITO A MANO en config (tesoreria.saldos_apertura),
-        # que es exactamente lo que hace el en las filas 121-128 de su maestra.
-        # Es el unico dato de apertura fiable que existe: deducirla restando
-        # movimientos se tapa sus propios agujeros, y el filtro de fecha del
-        # plan contable de Holded esta roto (devuelve el saldo de hoy).
+        # apertura escrita a mano en config: cuando exista un extracto REAL de
+        # fin de mes, manda sobre la contabilidad. Hoy esta vacio a proposito.
         ap_cfg = (self.cfg.get("tesoreria") or {}).get("saldos_apertura") or {}
         apert_manual = {}
         if str(ap_cfg.get("mes") or "") == str(mes):
             apert_manual = {str(k): float(v)
                             for k, v in (ap_cfg.get("cuentas") or {}).items()}
 
-        pi = self.d.get("plan_inicio")
-        pc = self.d.get("plan_contable")
-        saldo_conta, origen_inicio = None, "deducido de los movimientos del mes"
+        def _manual_de(nombre):
+            if not apert_manual:
+                return None
+            if nombre in apert_manual:
+                return apert_manual[nombre]
+            nn = norm(str(nombre))
+            for k, v in apert_manual.items():
+                if norm(k) == nn:
+                    return v
+            return None
+
+        por_cuenta = []
+        if conta:
+            for cta, x in sorted(conta.items(), key=lambda kv: kv[1]["variacion"]):
+                if (abs(x["inicio"]) < 0.005 and abs(x["hoy"]) < 0.005
+                        and abs(x["variacion"]) < 0.005):
+                    continue
+                nom_t = mapa_teso.get(cta)
+                nombre = nom_t or (x["nombre"] or f"cuenta {cta}")
+                hol = listado_saldo.get(nom_t) if nom_t else None
+                man = _manual_de(nombre)
+                fila = {"cuenta": nombre, "cta_contable": cta,
+                        "inicio": man if man is not None else x["inicio"],
+                        "hoy": x["hoy"], "variacion": x["variacion"],
+                        "n": int((del_mes["cuenta"] == nom_t).sum()) if nom_t else 0,
+                        "holded": None if hol is None else float(hol),
+                        "dif_holded": (None if hol is None
+                                       else float(hol) - x["hoy"])}
+                if man is not None:
+                    # extracto escrito + movimientos contabilizados vs cierre
+                    # contable: lo que no cuadre son apuntes que faltan
+                    fila["descuadre"] = x["hoy"] - man - x["variacion"]
+                por_cuenta.append(fila)
+            saldo_inicio = float(sum(f["inicio"] for f in por_cuenta))
+            saldo_hoy = float(sum(f["hoy"] for f in por_cuenta))
+            origen_inicio = ("extracto bancario, escrito a mano "
+                             f"({ap_cfg.get('confirmado', 'sin fecha')})"
+                             if apert_manual else
+                             "contable: asiento de apertura de enero + libro "
+                             "diario hasta fin del mes anterior")
+            variacion = saldo_hoy - saldo_inicio
+            desajuste = None
+        else:
+            # sin libro diario no hay foto fechada: se cae al listado con la
+            # apertura deducida, y se dice que ese numero es del dia que
+            # Alejandro toco los saldos, no de hoy
+            cc0 = self._conciliar_caja()
+            saldo_hoy = cc0["saldo"]
+            saldo_inicio = (float(sum(apert_manual.values())) if apert_manual
+                            else saldo_hoy - variacion)
+            origen_inicio = ("extracto escrito a mano" if apert_manual
+                             else "deducido de los movimientos (sin diario)")
+            variacion = saldo_hoy - saldo_inicio
+            desajuste = None
+            self._avisar(
+                "Sin libro diario no hay saldos con fecha: la posicion es la "
+                "del listado de Holded, que se rellena a mano y puede ser de "
+                "otro dia.")
         self.aviso_apertura = None
-        if apert_manual:
-            saldo_conta = float(sum(apert_manual.values()))
-            origen_inicio = (f"extracto bancario, escrito a mano "
-                             f"({ap_cfg.get('confirmado', 'sin fecha')})")
-        elif pi is not None and not pi.empty and mes == self.mes:
-            b57 = pi[pi["numero"].astype(str).str.match(PREF_CAJA)]
-            hoy57 = (pc[pc["numero"].astype(str).str.match(PREF_CAJA)]
-                     if pc is not None and not pc.empty else None)
-            if not b57.empty:
-                cand = float(b57["saldo"].sum())
-                mismo = (hoy57 is not None and not hoy57.empty
-                         and abs(cand - float(hoy57["saldo"].sum())) < 0.01)
-                if mismo:
-                    self.aviso_apertura = self._avisar(
-                        "No hay saldos de apertura escritos en config "
-                        "(tesoreria.saldos_apertura) y el filtro de fecha del "
-                        "plan contable de Holded esta roto, asi que el saldo "
-                        "de partida se deduce restando los movimientos del "
-                        "mes: si falta un movimiento, el error se reparte y "
-                        "no se ve. Escribe los saldos del extracto a fin de "
-                        "mes y el check pasa a ser de verdad.")
-                else:
-                    saldo_conta = cand
-                    origen_inicio = ("saldo contable de las cuentas 57* a fin "
-                                     "del mes anterior")
-        saldo_inicio = saldo_conta if saldo_conta is not None else saldo_hoy - variacion
-        # el hueco entre los dos caminos: si no es cero, faltan movimientos
-        desajuste = (None if saldo_conta is None
-                     else (saldo_hoy - saldo_inicio) - variacion)
-        if saldo_conta is not None:
-            variacion = saldo_hoy - saldo_inicio    # manda el saldo, no la suma
+        if not apert_manual and conta:
+            self.aviso_apertura = self._avisar(
+                "Apertura y saldo de hoy calculados desde el libro diario "
+                "(asiento de apertura de enero + movimientos): es la unica "
+                "foto con fecha. Los saldos del listado de Holded se rellenan "
+                "a mano y se ensenan al lado como referencia. Cuando tengas "
+                "el extracto real de fin de mes, escribelo en "
+                "tesoreria.saldos_apertura y mandara el.")
 
         # EL LEVERED ES LA VARIACION DE BANCOS, SIN ADORNOS. El gasto de
         # tarjeta del mes que vuelca en agosto se informa APARTE: sumarlo al
         # levered lo convertia en una cifra que no es la de nadie; el modelo
         # de Alejandro es saldo final menos saldo inicial, punto.
         variacion_bancos = variacion
-
-        # el descuadre POR BANCO: (apertura escrita + movimientos) - saldo de
-        # hoy. Si no es cero en una cuenta, ahi es donde Holded se esta
-        # dejando movimientos ("sin conciliar o algo"). Solo existe con
-        # apertura manual: con apertura deducida es cero por construccion.
-        if apert_manual:
-            def _ap(cta):
-                if cta in apert_manual:
-                    return apert_manual[cta]
-                nc = norm(str(cta))
-                for k, v in apert_manual.items():
-                    if norm(k) == nc:
-                        return v
-                return None
-            for x in por_cuenta:
-                a = _ap(x["cuenta"])
-                if a is not None:
-                    x["inicio"] = a
-                    x["descuadre"] = x["hoy"] - a - x["variacion"]
-                else:
-                    x["descuadre"] = None
-            # cuentas con apertura escrita que no aparecen en el listado
-            vistos = {norm(str(x["cuenta"])) for x in por_cuenta}
-            for k, v in apert_manual.items():
-                if norm(k) not in vistos and abs(v) > 0.005:
-                    por_cuenta.append({"cuenta": f"{k} (sin cuenta en Holded)",
-                                       "inicio": v, "hoy": 0.0,
-                                       "variacion": 0.0, "n": 0,
-                                       "descuadre": -v})
 
         # Lo que Holded tiene sin conciliar: el hueco declarado entre banco y
         # contabilidad. Es la primera explicacion que hay que mirar cuando el
@@ -1148,20 +1155,14 @@ class MotorCaja:
         b = self.d['bancos']
         saldo_cta = (float(b[b['tipo'] == 'cuenta']['saldo'].sum())
                      if not b.empty else 0.0)
-        # LA POSICION ES LA DEL LISTADO DE TESORERIA. Se probo sacarla del plan
-        # contable sumando las cuentas 57*, y el resultado publicado fue
-        # -2.997.589 euros contra los 358.864 del listado. O sea que el saldo
-        # que devuelve /accounting-accounts no es el saldo a fecha de hoy de esa
-        # cuenta: hay cuentas espejo (dos "Caja, euros" con +9.405 y -9.405) y
-        # bancos en negativo que en el banco tienen dinero. Hasta saber que
-        # mide exactamente ese campo, no manda sobre la posicion.
-        #
-        # Lo que si se hace es CONTRASTAR las dos fuentes cuenta a cuenta y
-        # publicar el contraste, porque el problema de origen sigue ahi: hay
-        # una segunda cuenta de Caixa con 24.705 euros que en el listado de
-        # tesoreria figura a cero, y por eso la posicion sale 23.806 corta
-        # contra los 382.670,40 de Alejandro. El enlace es el numero de cuenta
-        # contable que trae el propio listado, no el nombre.
+        # LA POSICION ES LA CONTABLE. Los saldos del listado de tesoreria los
+        # rellena Alejandro a mano (los ultimos, el 17/07): no son "hoy", son
+        # "el dia que los toco". La unica foto con fecha es el libro diario:
+        # asiento de apertura de enero + movimientos. El listado se guarda
+        # como declaracion manual y se contrasta al lado, nunca dentro.
+        conta57 = self._saldos_contables_57(self.mes)
+        saldo_contable = (float(sum(x["hoy"] for x in conta57.values()))
+                          if conta57 else None)
         pc = self.d.get("plan_contable")
         self.saldo_tesoreria = saldo_cta
         self.saldo_conta_hoy = None
@@ -1327,7 +1328,12 @@ class MotorCaja:
                         f"conocidas, asi que no es de fiar. Estan listadas en "
                         f"el contraste con contabilidad.")
 
+        # La cifra que manda es la contable si existe; el listado (con su
+        # rescate de cuentas a cero) queda como referencia declarada a mano.
+        if saldo_contable is not None:
+            saldo_cta = saldo_contable
         self._cc = {'saldo': saldo_cta, 'listado': self.saldo_tesoreria,
+                    'contable': saldo_contable,
                     'conciliacion': concilia, 'rescatado': self.rescatado,
                     'recons_ok': self.recons_ok, 'recons_n': self.recons_n,
                     'caja_contable': caja_conta}
@@ -1648,7 +1654,14 @@ class MotorCaja:
                 mm = mv[mv["cuenta"].isin(ctas)].copy()
                 mm["mes"] = mm["fecha"].map(mes_de)
                 pend_neto = float(mm[mm["mes"] == mes]["sin_conciliar"].sum())
-            resto = dif + pend_neto
+            # El pendiente solo CIERRA el cuadre cuando los dos extremos son
+            # independientes (apertura del extracto escrita a mano contra
+            # cierre contable). Cuando apertura y cierre salen los dos del
+            # libro diario, la resta es una identidad, dif ya es ~0, y sumarle
+            # el pendiente seria fabricar un descuadre: ahi el pendiente es
+            # informacion (extracto aun sin contabilizar), no un ajuste.
+            independiente = "extracto" in bk.get("origen_inicio", "")
+            resto = dif + (pend_neto if independiente else 0.0)
             return {
                 "pendiente_neto": pend_neto,
                 "resto_conciliar": resto,

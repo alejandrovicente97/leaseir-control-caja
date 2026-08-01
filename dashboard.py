@@ -453,6 +453,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     # movimiento: es la forma de que la cuenta de Caixa que falta se anuncie
     # sola en vez de descubrirse restando totales.
 
+    # la posicion es contable (libro diario); lo que Holded declara a mano se
+    # dice al lado, con su diferencia, para que nadie confunda las dos fotos
+    st = fc.get("saldo_tesoreria")
+    if st is not None and abs(st - fc["saldo_actual"]) > 1:
+        nota_pol = (f"según libro diario · Holded declara {eur(st)} "
+                    f"(saldos metidos a mano) · " + nota_pol)
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
@@ -1248,6 +1254,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         t_bancos = ""
         if pc:
             con_desc = any(x.get("descuadre") is not None for x in pc)
+            con_hol = any(x.get("holded") is not None for x in pc)
             f_pc, cl_pc = [], []
             for x in pc:
                 d = x.get("descuadre")
@@ -1256,23 +1263,38 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                     chip = f'<span class="rojo">{eur(d)}</span>'
                 elif d is not None:
                     chip = '<span class="chip ok">0</span>'
-                f_pc.append([esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
-                             f'<span class="{"neg" if x["variacion"] < 0 else ""}">'
-                             f'{eur(x["variacion"])}</span>', f'{x["n"]}',
-                             chip if con_desc else ""])
+                dh = x.get("dif_holded")
+                col_h = ("" if x.get("holded") is None else eur(x["holded"]))
+                col_dh = ("" if dh is None else
+                          (f'<span class="rojo">{eur(dh)}</span>'
+                           if abs(dh) > 50 else eur(dh)))
+                fila = [esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
+                        f'<span class="{"neg" if x["variacion"] < 0 else ""}">'
+                        f'{eur(x["variacion"])}</span>', f'{x["n"]}']
+                if con_hol:
+                    fila += [col_h, col_dh]
+                if con_desc:
+                    fila.append(chip)
+                f_pc.append(fila)
                 cl_pc.append("")
-            tot_d = sum(x["descuadre"] for x in pc
-                        if x.get("descuadre") is not None)
-            f_pc.append(["<b>Total</b>",
-                         f'<b>{eur(sum(x["inicio"] for x in pc))}</b>',
-                         f'<b>{eur(sum(x["hoy"] for x in pc))}</b>',
-                         f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', "",
-                         f'<b>{eur(tot_d)}</b>' if con_desc else ""])
+            tot = ["<b>Total</b>",
+                   f'<b>{eur(sum(x["inicio"] for x in pc))}</b>',
+                   f'<b>{eur(sum(x["hoy"] for x in pc))}</b>',
+                   f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', ""]
+            if con_hol:
+                tot += [f'<b>{eur(sum(x["holded"] for x in pc if x.get("holded") is not None))}</b>',
+                        f'<b>{eur(sum(x["dif_holded"] for x in pc if x.get("dif_holded") is not None))}</b>']
+            if con_desc:
+                tot.append(f'<b>{eur(sum(x["descuadre"] for x in pc if x.get("descuadre") is not None))}</b>')
+            f_pc.append(tot)
             cl_pc.append("total")
-            cabs = ["Cuenta", "Inicio (extracto)", "Hoy (Holded)", "Variación",
-                    "Movs."] + (["Descuadre"] if con_desc else [""])
+            cabs = ["Cuenta", "Inicio", "Hoy", "Variación", "Movs."]
+            if con_hol:
+                cabs += ["Holded declara", "Δ"]
+            if con_desc:
+                cabs.append("Descuadre")
             t_bancos = tabla(cabs, f_pc,
-                             alineacion=["", "r", "r", "r", "r", "r"],
+                             alineacion=[""] + ["r"] * (len(cabs) - 1),
                              clases=cl_pc)
         t_puente = (t_bancos + nota_tarj
                     + '<h2 style="font-size:15px;margin-top:22px">Y de la '
@@ -2059,11 +2081,13 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 
   <section>
     <h2>El check: variación de bancos = cobros + pagos</h2>
-    <p class="h2n">Saldo con el que empezó el mes cada banco (del extracto,
-     escrito a mano en config, como en tu maestra), saldo hoy según Holded, y
-     la variación: eso ES el levered. El <b>descuadre</b> de cada banco es
-     (apertura + movimientos − saldo hoy): si no es cero, ahí es donde Holded
-     se está dejando movimientos — sin conciliar o sin sincronizar.</p>
+    <p class="h2n"><b>Inicio</b> y <b>Hoy</b> salen del libro diario (asiento
+     de apertura de enero + movimientos): es la única foto con fecha de este
+     sistema. Los saldos del listado de Holded se rellenan a mano —los últimos,
+     el 17/07— así que van al lado como <b>Holded declara</b>, con su Δ contra
+     contabilidad, nunca dentro de la cuenta. La variación ES el levered. El
+     día que tengas el extracto real de fin de mes, escríbelo en
+     <code>tesoreria.saldos_apertura</code> y manda él.</p>
     {t_puente}
   </section>
 

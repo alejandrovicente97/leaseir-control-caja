@@ -542,17 +542,17 @@ tesoreria:
   # deducido: si el descuadre de dos cuentas hermanas sale igual y de signo
   # contrario, intercambia los dos importes. Cada mes nuevo: actualizar mes y
   # saldos (un minuto), o dejarlo vacio y se vuelve a deducir con aviso.
+  # VACIO A PROPOSITO. Los valores que habia (los de su Excel, y tambien los
+  # saldos del listado de Holded) los relleno el a mano alrededor del 17/07,
+  # de vuelta de vacaciones: no son una foto del 30/06 ni de hoy, y usarlos
+  # como si lo fueran es fabricar un check. Mientras esto este vacio, la
+  # apertura y el saldo de hoy salen de CONTABILIDAD (asiento de apertura de
+  # enero + libro diario), que es lo unico con fecha de verdad. El dia que
+  # tenga delante el extracto real de fin de mes, lo escribe aqui y manda.
   saldos_apertura:
-    mes: 202607
-    confirmado: "30/06/2026, fichero 20260717 - Forecast CashFlow.xlsx"
-    cuentas:
-      "CUENTA SANTANDER ONE EMPRESAS (2600)": 344818.88
-      "CUENTA SANTANDER ONE EMPRESAS 2031": 67455.22
-      "BBVA- CUENTA CORRIENTE": 114852.76
-      "BBVA (4827)": 74354.22
-      "CAIXABANK (8744)": 24705.90
-      "CAIXA (5388)": 32763.21
-      "CUENTA SABADELL EMPRESAS": 45851.35
+    mes: 202608
+    confirmado: ""
+    cuentas: {}
 
   saldos_manuales: []
   # saldos_manuales:
