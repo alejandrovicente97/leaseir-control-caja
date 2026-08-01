@@ -681,6 +681,11 @@ class MotorCaja:
         # corregido, los 24.705 de la cuenta de Caixa que Holded declara a cero
         # apareceria como flujo del mes en vez de como saldo que ya estaba.
         variacion = float(del_mes["importe"].sum())
+        # el movimiento del mes segun el EXTRACTO (feed bancario), guardado
+        # aparte: es el segundo check de Alejandro, "que el levered te cuadre
+        # con el movimiento real de la caja". Contra el diario no es un check
+        # (identidad); contra el extracto, si.
+        feed_neto = variacion
 
         # LA POSICION, EN LOS DOS CORTES, SALE DE CONTABILIDAD.
         # Ni los saldos del listado de Holded ni las aperturas del Excel de
@@ -846,6 +851,7 @@ class MotorCaja:
             "saldo_hoy": saldo_hoy,
             "variacion_bancos": variacion_bancos,
             "gasto_tarjeta_mes": gasto_tarjeta_mes,
+            "feed_neto": feed_neto,
             "levered": variacion,
             "deuda": deuda,
             "gasto_tarjetas": gasto_tarjetas,

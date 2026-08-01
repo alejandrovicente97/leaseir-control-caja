@@ -1426,28 +1426,48 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     sb = meta.get("serie_fcf") or []
     su = meta.get("serie_unlevered") or []
     if sb:
-        f_su = [[esc(x["etiqueta"]), eur(x["saldo_inicio"]), eur(x["saldo_hoy"]),
-                 f'<span class="{"neg" if x["levered"] < 0 else ""}">'
-                 f'{eur(x["levered"])}</span>',
-                 f'<span class="{"neg" if x["deuda"] < 0 else ""}">'
-                 f'{eur(x["deuda"])}</span>',
-                 f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
-                 f'{eur(x["unlevered"])}</span></b>'] for x in sb]
+        # SU SEGUNDO CHECK, mes a mes: el levered (contable) contra el
+        # movimiento real del extracto bancario. Si Δ no es ~0, o el diario
+        # va por detras del banco (sin conciliar) o el feed de ese mes esta
+        # incompleto. Contra el diario no seria un check: seria una identidad.
+        def _feed(x):
+            f = x.get("feed_neto")
+            if f is None:
+                return "", ""
+            d = x["levered"] - f
+            cel_d = (f'<span class="rojo">{eur(d)}</span>' if abs(d) > 1000
+                     else f'<span class="chip ok">{eur(d)}</span>')
+            return eur(f), cel_d
+        f_su = []
+        for x in sb:
+            fe, fd = _feed(x)
+            f_su.append([esc(x["etiqueta"]), eur(x["saldo_inicio"]),
+                         eur(x["saldo_hoy"]),
+                         f'<span class="{"neg" if x["levered"] < 0 else ""}">'
+                         f'{eur(x["levered"])}</span>', fe, fd,
+                         f'<span class="{"neg" if x["deuda"] < 0 else ""}">'
+                         f'{eur(x["deuda"])}</span>',
+                         f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
+                         f'{eur(x["unlevered"])}</span></b>'])
         # El agregado es lo que se compara de verdad contra el bottom-up: un
         # mes suelto puede irse por un apunte, el acumulado no.
+        tot_feed = sum(x.get("feed_neto") or 0 for x in sb)
         f_su.append([
             f'<b>Acumulado {esc(sb[0]["etiqueta"])} — {esc(sb[-1]["etiqueta"])}</b>',
             f'<b>{eur(sb[0]["saldo_inicio"])}</b>',
             f'<b>{eur(sb[-1]["saldo_hoy"])}</b>',
             f'<b><span class="{"neg" if sum(x["levered"] for x in sb) < 0 else ""}">'
             f'{eur(sum(x["levered"] for x in sb))}</span></b>',
+            f'<b>{eur(tot_feed)}</b>',
+            f'<b>{eur(sum(x["levered"] for x in sb) - tot_feed)}</b>',
             f'<b><span class="{"neg" if sum(x["deuda"] for x in sb) < 0 else ""}">'
             f'{eur(sum(x["deuda"] for x in sb))}</span></b>',
             f'<b><span class="{"neg" if sum(x["unlevered"] for x in sb) < 0 else ""}">'
             f'{eur(sum(x["unlevered"] for x in sb))}</span></b>'])
         t_serie = tabla(["Mes", "Saldo inicial", "Saldo final", "Levered FCF",
-                         "Pagos de deuda", "Unlevered FCF"], f_su,
-                        alineacion=["", "r", "r", "r", "r", "r"],
+                         "Extracto (mov.)", "Δ", "Pagos de deuda",
+                         "Unlevered FCF"], f_su,
+                        alineacion=["", "r", "r", "r", "r", "r", "r", "r"],
                         clases=[""] * (len(f_su) - 1) + ["total"])
     elif su:
         f_su = [[esc(x["etiqueta"]), eur(x["variacion_caja"]),
