@@ -262,28 +262,18 @@ def pantalla_nacho(rn, fc, meta):
     def cifra(v):
         return f'<span class="{"neg" if v < 0 else ""}">{eur(v)}</span>'
 
-    # --- la banda de respuesta -----------------------------------------
+    # --- la respuesta, sin banda ----------------------------------------
+    # Alejandro: "esto lo puedes quitar". La banda de la pregunta ocupaba
+    # una quinta parte de la pantalla para decir una palabra. El veredicto
+    # se queda -es la pregunta de la reunion- pero como una linea dentro
+    # del KPI de posicion, que es donde vive esa respuesta.
     if not rn["llega"]:
-        banda_cls, cabeza = "no", "NO. Hay que tirar de póliza"
-        sub = (f'El cierre proyectado de {esc(rn["etiqueta_mes"])} es '
-               f'{eur(rn["cierre_mes"])}. Con {eur(rn["polizas"])} de póliza '
-               f'libre se cubre, pero se dispone.')
+        v_cls, v_txt = "crit", f'hay que tirar de póliza · cierre {eur(rn["cierre_mes"])}'
     elif rn["cierre_mes"] < col:
-        banda_cls, cabeza = "justo", "SÍ, pero justo"
-        sub = (f'Cierre proyectado {eur(rn["cierre_mes"])}, por debajo del '
-               f'colchón de {eur(col)}. Margen {eur(rn["holgura"])}.')
+        v_cls, v_txt = "warn", f'llegamos justos · cierre {eur(rn["cierre_mes"])}'
     else:
-        banda_cls, cabeza = "si", "SÍ, sin tocar la póliza"
-        sub = (f'Cierre proyectado {eur(rn["cierre_mes"])}, '
-               f'{eur(rn["holgura"])} por encima del colchón de {eur(col)}.')
-    peor = ""
-    if rn["peor_saldo"] < col:
-        peor = (f' <b>El punto flojo es {esc(rn["peor_mes"])}: '
-                f'{eur(rn["peor_saldo"])}.</b>')
-    banda = (f'<div class="nq {banda_cls}">'
-             f'<div class="nq-p">{esc(rn["pregunta"])}</div>'
-             f'<div class="nq-r">{esc(cabeza)}</div>'
-             f'<div class="nq-s">{sub}{peor}</div></div>')
+        v_cls, v_txt = "ok", f'llegamos sin póliza · cierre {eur(rn["cierre_mes"])}'
+    veredicto = f'<span class="chip {v_cls}">{v_txt}</span>'
 
     # --- los cinco numeros ----------------------------------------------
     def nk(t, v, n, estado="", det=""):
@@ -293,7 +283,12 @@ def pantalla_nacho(rn, fc, meta):
                 f'<div class="nk-n">{n}{b}</div></div>')
 
     est_pos = "" if rn["saldo_hoy"] >= col else "malo"
-    nota_pos = f'+ {eur(rn["polizas"])} de póliza = {eur(rn["liquidez"])} disponibles'
+    peor = ""
+    if rn["peor_saldo"] < col:
+        peor = (f' · <span class="rojo">punto flojo {esc(rn["peor_mes"])} '
+                f'{eur(rn["peor_saldo"])}</span>')
+    nota_pos = (f'{veredicto}<br>+ {eur(rn["polizas"])} de póliza = '
+                f'{eur(rn["liquidez"])} disponibles{peor}')
     kpis = "".join([
         nk("Posición de tesorería hoy", eur(rn["saldo_hoy"]), nota_pos,
            est_pos, "m-bancos"),
@@ -325,18 +320,38 @@ def pantalla_nacho(rn, fc, meta):
     g1 = _flex(waterfall(rn["saldo_hoy"], pasos, ancho=430, alto=300), 300)
 
     # --- grafico 2: el puente, que es su check --------------------------
-    f_p = [["Variación de bancos (tesorería)", cifra(rn["levered_mes"])],
-           ["&nbsp;&nbsp;<i>de la que está sin conciliar</i>",
-            f'<i>{eur(rn["check_pendiente"])}</i>'],
-           ["<b>= LEVERED</b>", f'<b>{cifra(rn["levered_mes"])}</b>'],
+    # EL PUENTE TIENE QUE SUMAR A LA VISTA. Antes se ensenaba el resultado
+    # -variacion de bancos- y el resto se iba a un chip rojo al margen:
+    # "no me cuadra el unlevered". Ahora estan las cuatro piezas, y la de
+    # ajuste tiene nombre: lo que el banco ya movio y el diario aun no
+    # tiene apuntado. levered = cobros + pagos + sin conciliar + sin apuntar.
+    ajuste = -rn["check_resto"]
+    f_p = [[f'Cobros de {esc(rn["etiqueta_mes"])} (libro diario)',
+            cifra(rn["cobros_diario"])],
+           [f'Pagos de {esc(rn["etiqueta_mes"])} (libro diario)',
+            cifra(rn["pagos_diario"])],
+           ["Sin conciliar del extracto (con signo)",
+            cifra(rn["check_pendiente"])],
+           ["<i>Movimientos del banco aún sin apuntar</i>",
+            f'<i>{cifra(ajuste)}</i>'],
+           ["<b>= LEVERED</b> · variación de bancos",
+            f'<b>{cifra(rn["levered_mes"])}</b>'],
            ["Pagos de deuda (por arriba)", cifra(rn["deuda_mes"])],
            ["<b>= UNLEVERED</b>", f'<b>{cifra(rn["unlev_mes_ej"])}</b>']]
-    chk = ('<span class="chip ok">cuadra</span>' if rn["check_ok"]
-           else f'<span class="chip crit">{eur(rn["check_resto"])} sin explicar</span>')
+    # Un resto pequeño contra una posición de seis cifras no es un error: es
+    # contabilidad yendo por detrás del banco, que es la norma. Se dice en
+    # ámbar y con su nombre. El rojo se reserva para lo que no se explica.
+    resto_gordo = abs(rn["check_resto"]) > max(2000.0, abs(rn["saldo_hoy"]) * 0.01)
+    chk = ('<span class="chip ok">cuadra</span>' if rn["check_ok"] else
+           (f'<span class="chip crit">contabilidad va {eur(abs(ajuste))} por '
+            f'detrás</span>' if resto_gordo else
+            f'<span class="chip warn">contabilidad va {eur(abs(ajuste))} por '
+            f'detrás</span>'))
     g2 = (tabla(["El puente", "Importe"], f_p, alineacion=["", "r"],
-                clases=["", "", "sub", "", "total"])
-          + f'<p class="nn">Movimientos del banco, conciliados y sin '
-            f'conciliar, contra la diferencia de saldos: {chk}</p>')
+                clases=["", "", "", "", "sub", "", "total"])
+          + f'<p class="nn">Las cuatro líneas suman el levered. {chk} · '
+            f'Perímetro: <b>Leaseir Technologies</b>, sin LML, Nobis, Mesia '
+            f'ni USA (tu bottom-up consolida los cinco).</p>')
 
     # --- grafico 3: los tres meses siguientes ---------------------------
     if rn["proximos"]:
@@ -429,7 +444,6 @@ def pantalla_nacho(rn, fc, meta):
 
     return f'''
   <div class="nacho">
-    {banda}
     <div class="nkpis">{kpis}</div>
     <div class="ngrid">
       <div class="ncard"><h3>De hoy al cierre de {esc(rn["etiqueta_mes"])}</h3>{g1}</div>
@@ -2313,8 +2327,10 @@ body.reunion #p0.panel.visible{{display:flex;flex-direction:column;
  .nk-v{{font-size:21px}} .nk-n{{font-size:10.5px}}
  .ncard{{padding:7px 11px 5px}} .ncard table{{font-size:11.5px}}
  .ncard td,.ncard th{{padding:2px 5px}}
- .bstack{{height:22px;margin:5px 0}} .bleg{{font-size:11.5px}}
- .nn{{font-size:10.5px;line-height:1.3}}
+ .bstack{{height:20px;margin:4px 0 5px}} .bleg{{font-size:11.5px;gap:14px}}
+ .bleg.map{{margin-top:5px;font-size:11px}}
+ .nn{{font-size:10.5px;line-height:1.3;margin-top:4px}}
+ .nq-p{{margin-bottom:1px}}
  /* la cabecera tambien cede: en la reunion lo que importa es el numero,
     no el logo. Solo en la pestana de reunion y solo si hace falta. */
  body.reunion .marca{{padding:12px 20px}}

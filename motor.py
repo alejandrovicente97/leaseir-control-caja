@@ -1209,7 +1209,12 @@ class MotorCaja:
             "detalle_deuda": bk.get("detalle_deuda") or [],
             "cobros": cob, "certidumbre": cert, "max_vencido": max_venc,
             "check_resto": resto, "check_ok": abs(resto) <= tol,
+            "check_tol": tol,
             "check_pendiente": float(cu.get("pendiente_neto", 0) or 0),
+            # las piezas del puente, para que sume A LA VISTA:
+            #   cobros + pagos (diario) + sin conciliar + sin apuntar = levered
+            "cobros_diario": float(cu.get("cobros_ejecutados", 0) or 0),
+            "pagos_diario": float(cu.get("pagos_ejecutados", 0) or 0),
             "por_cuenta": bk.get("por_cuenta") or [],
         }
 
