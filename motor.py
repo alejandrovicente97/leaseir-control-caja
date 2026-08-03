@@ -584,6 +584,43 @@ class MotorCaja:
                                 "variacion": v}
         return salida
 
+    def _pend_extracto(self, mes: str) -> tuple[dict, dict]:
+        """
+        Lo que el extracto bancario tiene y contabilidad todavia no, CON
+        SIGNO, por cuenta de tesoreria y partido en dos: lo de meses
+        ANTERIORES a `mes` y lo DEL propio `mes`.
+
+        Es la otra mitad de la posicion. El libro diario es la unica foto con
+        fecha, pero va por detras del banco -sobre todo los primeros dias del
+        mes, cuando el banco ya se ha movido y los apuntes no estan-. Estos
+        movimientos sin conciliar son exactamente esa diferencia: dinero que
+        el banco ya vio y el diario aun no tiene apuntado. Es la identidad de
+        Alejandro, contabilidad + pendiente = banco, aplicada cuenta a cuenta.
+
+        Solo cuentas corrientes: lo sin conciliar de una tarjeta o una poliza
+        no es posicion bancaria. Y nada posterior a `mes`: el pendiente de
+        agosto no toca la foto de julio.
+        """
+        mv, ban = self.d.get("movimientos"), self.d.get("bancos")
+        if (mv is None or mv.empty or "sin_conciliar" not in mv.columns
+                or ban is None or ban.empty):
+            return {}, {}
+        ctas = set(ban[ban["tipo"] == "cuenta"]["cuenta"])
+        mm = mv[mv["cuenta"].isin(ctas)
+                & (mv["sin_conciliar"].abs() > 0.005)].copy()
+        if mm.empty:
+            return {}, {}
+        mm["mes"] = mm["fecha"].map(mes_de)
+        prev, del_mes = {}, {}
+        for cta, g in mm.groupby("cuenta"):
+            a = float(g[g["mes"] < mes]["sin_conciliar"].sum())
+            b = float(g[g["mes"] == mes]["sin_conciliar"].sum())
+            if abs(a) > 0.005:
+                prev[str(cta)] = a
+            if abs(b) > 0.005:
+                del_mes[str(cta)] = b
+        return prev, del_mes
+
     def _avisar(self, texto: str) -> str:
         """Deja el aviso en la lista de calidad del dato y lo devuelve."""
         if texto not in self.avisos:
@@ -687,14 +724,17 @@ class MotorCaja:
         # (identidad); contra el extracto, si.
         feed_neto = variacion
 
-        # LA POSICION, EN LOS DOS CORTES, SALE DE CONTABILIDAD.
-        # Ni los saldos del listado de Holded ni las aperturas del Excel de
-        # Alejandro son fotos fechadas: los rellena el A MANO (los ultimos,
-        # el 17/07, de vuelta de vacaciones). Lo unico de este sistema que
-        # lleva fecha de verdad es el libro diario: asiento de apertura de
-        # enero mas movimientos. De ahi salen el saldo a fin del mes anterior
-        # y el de hoy, cuenta a cuenta, y el levered es su diferencia. El
-        # saldo que declara Holded se ensena AL LADO, como declaracion manual,
+        # LA POSICION, EN LOS DOS CORTES, SALE DE CONTABILIDAD MAS LO QUE EL
+        # EXTRACTO TIENE SIN CONCILIAR. Ni los saldos del listado de Holded
+        # ni las aperturas del Excel de Alejandro son fotos fechadas: los
+        # rellena el A MANO (los ultimos, el 17/07, de vuelta de vacaciones).
+        # Lo unico de este sistema que lleva fecha de verdad es el libro
+        # diario: asiento de apertura de enero mas movimientos. Pero el
+        # diario va por detras del banco, asi que a cada corte se le suma lo
+        # que el extracto ya vio y el diario aun no tiene apuntado (sin
+        # conciliar, con signo): contabilidad + pendiente = banco, cuenta a
+        # cuenta. El levered es la diferencia entre los dos cortes. El saldo
+        # que declara Holded se ensena AL LADO, como declaracion manual,
         # nunca dentro de la cuenta.
         conta = self._saldos_contables_57(mes)
         mapa_teso = {}
@@ -725,35 +765,77 @@ class MotorCaja:
                     return v
             return None
 
+        # LO QUE EL BANCO YA VIO Y EL DIARIO AUN NO TIENE APUNTADO, con signo
+        # y por cuenta. Sin esto la posicion se queda congelada: "no mueve las
+        # cajas desde el inicio hasta hoy" (Alejandro, 3-ago), porque los
+        # apuntes de los primeros dias del mes van por detras del banco. La
+        # identidad es la suya: contabilidad + pendiente = banco. Lo anterior
+        # al mes entra en los dos cortes (ya faltaba al abrir y sigue
+        # faltando); lo del mes solo en el de hoy.
+        pend_prev, pend_mes_cta = self._pend_extracto(mes)
+        pend_usado = set()
+
         por_cuenta = []
         if conta:
             for cta, x in sorted(conta.items(), key=lambda kv: kv[1]["variacion"]):
-                if (abs(x["inicio"]) < 0.005 and abs(x["hoy"]) < 0.005
-                        and abs(x["variacion"]) < 0.005):
-                    continue
                 nom_t = mapa_teso.get(cta)
+                pp = pm = 0.0
+                if nom_t and nom_t not in pend_usado:
+                    pp = pend_prev.get(nom_t, 0.0)
+                    pm = pend_mes_cta.get(nom_t, 0.0)
+                    pend_usado.add(nom_t)
+                if (abs(x["inicio"]) < 0.005 and abs(x["hoy"]) < 0.005
+                        and abs(x["variacion"]) < 0.005
+                        and abs(pp) < 0.005 and abs(pm) < 0.005):
+                    continue
                 nombre = nom_t or (x["nombre"] or f"cuenta {cta}")
                 hol = listado_saldo.get(nom_t) if nom_t else None
                 man = _manual_de(nombre)
+                inicio = man if man is not None else x["inicio"] + pp
+                hoy = x["hoy"] + pp + pm
                 fila = {"cuenta": nombre, "cta_contable": cta,
-                        "inicio": man if man is not None else x["inicio"],
-                        "hoy": x["hoy"], "variacion": x["variacion"],
+                        "inicio": inicio,
+                        "hoy": hoy, "variacion": hoy - inicio,
+                        "contable": x["hoy"], "sin_contab": pp + pm,
                         "n": int((del_mes["cuenta"] == nom_t).sum()) if nom_t else 0,
                         "holded": None if hol is None else float(hol),
                         "dif_holded": (None if hol is None
-                                       else float(hol) - x["hoy"])}
+                                       else float(hol) - hoy)}
                 if man is not None:
-                    # extracto escrito + movimientos contabilizados vs cierre
-                    # contable: lo que no cuadre son apuntes que faltan
-                    fila["descuadre"] = x["hoy"] - man - x["variacion"]
+                    # (contable + pendiente del extracto) contra el extracto
+                    # REAL escrito a mano: si no es cero, faltan apuntes que
+                    # ni el diario ni el feed del banco estan viendo
+                    fila["descuadre"] = x["inicio"] + pp - man
                 por_cuenta.append(fila)
+            # cuentas de tesoreria con movimientos sin conciliar y SIN cuenta
+            # contable detras (o sin apunte alguno en el diario): el banco
+            # las conoce, contabilidad no. Es dinero real y se ensena; si se
+            # tirara, el KPI y esta tabla dirian numeros distintos.
+            for cta_t in sorted(set(pend_prev) | set(pend_mes_cta)):
+                if cta_t in pend_usado:
+                    continue
+                pp = pend_prev.get(cta_t, 0.0)
+                pm = pend_mes_cta.get(cta_t, 0.0)
+                if abs(pp) < 0.005 and abs(pm) < 0.005:
+                    continue
+                man = _manual_de(cta_t)
+                hol = listado_saldo.get(cta_t)
+                inicio = man if man is not None else pp
+                hoy = pp + pm
+                por_cuenta.append({
+                    "cuenta": cta_t, "cta_contable": "",
+                    "inicio": inicio, "hoy": hoy, "variacion": hoy - inicio,
+                    "contable": 0.0, "sin_contab": pp + pm,
+                    "n": int((del_mes["cuenta"] == cta_t).sum()),
+                    "holded": None if hol is None else float(hol),
+                    "dif_holded": None if hol is None else float(hol) - hoy})
             saldo_inicio = float(sum(f["inicio"] for f in por_cuenta))
             saldo_hoy = float(sum(f["hoy"] for f in por_cuenta))
             origen_inicio = ("extracto bancario, escrito a mano "
                              f"({ap_cfg.get('confirmado', 'sin fecha')})"
                              if apert_manual else
-                             "contable: asiento de apertura de enero + libro "
-                             "diario hasta fin del mes anterior")
+                             "contable (apertura de enero + libro diario) mas "
+                             "lo sin conciliar del extracto, con signo")
             variacion = saldo_hoy - saldo_inicio
             desajuste = None
         else:
@@ -775,12 +857,15 @@ class MotorCaja:
         self.aviso_apertura = None
         if not apert_manual and conta:
             self.aviso_apertura = self._avisar(
-                "Apertura y saldo de hoy calculados desde el libro diario "
-                "(asiento de apertura de enero + movimientos): es la unica "
-                "foto con fecha. Los saldos del listado de Holded se rellenan "
-                "a mano y se ensenan al lado como referencia. Cuando tengas "
-                "el extracto real de fin de mes, escribelo en "
-                "tesoreria.saldos_apertura y mandara el.")
+                "Posicion estimada como contabilidad (asiento de apertura de "
+                "enero + libro diario) MAS lo que el extracto tiene sin "
+                "conciliar, con signo. Es tu propia identidad -contabilidad "
+                "+ pendiente = banco- y es lo que hace que la posicion se "
+                "mueva cada dia aunque los apuntes vayan por detras del "
+                "banco. Los saldos del listado de Holded se rellenan a mano "
+                "y quedan al lado como referencia. Cuando tengas el extracto "
+                "real de fin de mes, escribelo en tesoreria.saldos_apertura "
+                "y mandara el.")
 
         # EL LEVERED ES LA VARIACION DE BANCOS, SIN ADORNOS. El gasto de
         # tarjeta del mes que vuelca en agosto se informa APARTE: sumarlo al
@@ -1334,12 +1419,20 @@ class MotorCaja:
                         f"conocidas, asi que no es de fiar. Estan listadas en "
                         f"el contraste con contabilidad.")
 
-        # La cifra que manda es la contable si existe; el listado (con su
-        # rescate de cuentas a cero) queda como referencia declarada a mano.
+        # La cifra que manda es la contable si existe, MAS lo que el extracto
+        # tiene sin conciliar (con signo): contabilidad + pendiente = banco,
+        # la misma identidad de la comprobacion de arriba. Sin el pendiente,
+        # el saldo "de hoy" es el del ultimo apunte del diario y se queda
+        # quieto los dias en que la contabilidad va por detras del banco, que
+        # es la norma a principios de mes. El listado (con su rescate de
+        # cuentas a cero) queda como referencia declarada a mano.
+        pend_caja = 0.0
         if saldo_contable is not None:
-            saldo_cta = saldo_contable
+            pp_e, pm_e = self._pend_extracto(self.mes)
+            pend_caja = float(sum(pp_e.values()) + sum(pm_e.values()))
+            saldo_cta = saldo_contable + pend_caja
         self._cc = {'saldo': saldo_cta, 'listado': self.saldo_tesoreria,
-                    'contable': saldo_contable,
+                    'contable': saldo_contable, 'pend_caja': pend_caja,
                     'conciliacion': concilia, 'rescatado': self.rescatado,
                     'recons_ok': self.recons_ok, 'recons_n': self.recons_n,
                     'caja_contable': caja_conta}
@@ -1618,10 +1711,10 @@ class MotorCaja:
         #
         #   saldo de apertura del banco  +  cobros  +  pagos  =  saldo de hoy
         #
-        # con los dos extremos sacados de sitios INDEPENDIENTES: la apertura del
-        # saldo contable de las 57* cerrado a fin del mes anterior, y el de hoy
-        # del saldo que da Holded. Si no cuadra, falta algo, y eso es lo unico
-        # que un check debe poder decir.
+        # con los dos extremos en la misma definicion -contabilidad mas lo sin
+        # conciliar del extracto, cada uno en su fecha- y los flujos del libro
+        # diario en medio. Si no cuadra, falta algo, y eso es lo unico que un
+        # check debe poder decir.
         #
         # Lo que habia antes era saldo inicial + cash in + cash out = saldo
         # final, con el saldo final calculado como saldo inicial + flujo. Eso
@@ -1651,23 +1744,18 @@ class MotorCaja:
             # de 324.819: peor que no restar nada. Un recibo de mayo sin
             # conciliar no toca la variacion de julio; el que si la toca es el
             # movimiento DE JULIO que esta en el extracto y no en el diario.
-            mv, ban2 = self.d.get("movimientos"), self.d.get("bancos")
-            pend_neto = 0.0
-            if (mv is not None and not mv.empty
-                    and "sin_conciliar" in mv.columns
-                    and ban2 is not None and not ban2.empty):
-                ctas = set(ban2[ban2["tipo"] == "cuenta"]["cuenta"])
-                mm = mv[mv["cuenta"].isin(ctas)].copy()
-                mm["mes"] = mm["fecha"].map(mes_de)
-                pend_neto = float(mm[mm["mes"] == mes]["sin_conciliar"].sum())
-            # El pendiente solo CIERRA el cuadre cuando los dos extremos son
-            # independientes (apertura del extracto escrita a mano contra
-            # cierre contable). Cuando apertura y cierre salen los dos del
-            # libro diario, la resta es una identidad, dif ya es ~0, y sumarle
-            # el pendiente seria fabricar un descuadre: ahi el pendiente es
-            # informacion (extracto aun sin contabilizar), no un ajuste.
-            independiente = "extracto" in bk.get("origen_inicio", "")
-            resto = dif + (pend_neto if independiente else 0.0)
+            # mismo helper que la posicion: si el cuadre y la tabla de bancos
+            # contasen el pendiente cada uno a su manera, un movimiento de
+            # centimos filtrado en un sitio y no en el otro fabricaria resto
+            _, pm_e = self._pend_extracto(mes)
+            pend_neto = float(sum(pm_e.values()))
+            # El saldo de hoy ya lleva sumado lo sin conciliar del extracto
+            # (contabilidad + pendiente = banco, cuenta a cuenta). "Apertura
+            # + cobros y pagos del diario" se queda en el cierre contable:
+            # le falta exactamente el pendiente DEL MES para llegar al saldo
+            # de hoy. Se suma, y lo que quede despues es descuadre de verdad:
+            # movimientos que no estan ni en el diario ni en el extracto.
+            resto = dif + pend_neto
             return {
                 "pendiente_neto": pend_neto,
                 "resto_conciliar": resto,
@@ -1690,10 +1778,11 @@ class MotorCaja:
                 "sin_conciliar": [], "resumen_sin_conciliar": [],
                 "importe_sin_conciliar": 0.0, "residuo": dif, "por_cuenta": [],
                 "explicacion": (
-                    "Los dos extremos salen de sitios distintos: la apertura del "
-                    "saldo contable de las cuentas 57* a fin del mes anterior, y "
-                    "el de hoy del saldo que da Holded. Lo que no cuadre entre "
-                    "ellos son movimientos que faltan, no un ajuste de criterio."),
+                    "Los dos extremos son contabilidad mas lo sin conciliar "
+                    "del extracto, cada uno en su fecha. Entre medias, los "
+                    "cobros y pagos del libro diario mas el pendiente del "
+                    "mes. Lo que no cuadre son movimientos que no estan ni en "
+                    "el diario ni en el extracto, no un ajuste de criterio."),
             }
 
         if nat is not None and not nat.empty:

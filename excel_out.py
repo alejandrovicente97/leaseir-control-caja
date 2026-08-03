@@ -249,7 +249,10 @@ def _hoja_proveedores(wb, dp, pagado_mes_fac):
 def _hoja_bancos(wb, bk, mec):
     ws = wb.create_sheet("Bancos")
     ws.cell(1, 1, "Bottom Up - banco a banco").font = f_tit
-    _cab(ws, 3, ["Cuenta", "Al empezar el mes", "Hoy", "Variación", "Movs"])
+    # Inicio y Hoy = contabilidad + lo sin conciliar del extracto (con signo).
+    # "Sin contab." dice cuanto de cada saldo es extracto aun sin apuntar.
+    _cab(ws, 3, ["Cuenta", "Al empezar el mes", "Hoy", "Variación",
+                 "Sin contab.", "Movs"])
     f = 4
     pc = (bk or {}).get("por_cuenta") or []
     for x in pc:
@@ -257,13 +260,14 @@ def _hoja_bancos(wb, bk, mec):
         _n(ws, f, 2, round(x["inicio"], 2))
         _n(ws, f, 3, round(x["hoy"], 2))
         _n(ws, f, 4, f"=C{f}-B{f}")
-        ws.cell(f, 5, x["n"])
+        _n(ws, f, 5, round(float(x.get("sin_contab") or 0), 2))
+        ws.cell(f, 6, x["n"])
         f += 1
     if pc:
         ws.cell(f, 1, "TOTAL")
-        for col in "BCD":
+        for col in "BCDE":
             _n(ws, f, ord(col) - 64, f"=SUM({col}4:{col}{f-1})")
-        _sub(ws, f, 5)
+        _sub(ws, f, 6)
         f += 1
     f += 1
     cn = (mec or {}).get("concil") or {}
@@ -290,7 +294,7 @@ def _hoja_bancos(wb, bk, mec):
     ws.cell(f, 1, "TOTAL deuda")
     _n(ws, f, 2, f"=SUM(B{ini_deu}:B{f-1})" if f > ini_deu else 0)
     _sub(ws, f, 2)
-    _anchos(ws, [52, 18, 16, 14, 8])
+    _anchos(ws, [52, 18, 16, 14, 13, 8])
     return f  # fila del total de deuda
 
 
@@ -443,9 +447,11 @@ def generar(ruta, fc, cuadre, meta) -> None:
 
         K120 = I115 - J118   (levered ejecutado - variacion de la posicion)
 
-    Si no da cero, algo se esta dejando: debajo esta lo sin conciliar del
-    mes y lo que queda sin explicar despues de eso. Sus formulas, sus
-    filas, sus codigos 1-6 en la columna B para el Visual Nacho.
+    La posicion (121-128) es contabilidad MAS lo sin conciliar del extracto,
+    asi que K120 da exactamente MENOS el pendiente del mes: K136 (= K120 +
+    K135) es el que debe ser ~0. Si no lo es, faltan movimientos que ni el
+    diario ni el extracto ven. Sus formulas, sus filas, sus codigos 1-6 en
+    la columna B para el Visual Nacho.
     """
     mec = meta.get("mes_en_curso") or {}
     dc = fc.get("detalle_cobros")
@@ -715,11 +721,15 @@ def generar(ruta, fc, cuadre, meta) -> None:
     ws.row_dimensions.group(131, 133, outline_level=1)
 
     # lo que explica el check cuando no es cero
+    # El saldo de los bancos (121-128) ya lleva sumado lo sin conciliar, asi
+    # que K120 (levered contable - variacion de posicion) da exactamente MENOS
+    # el pendiente del mes: K120 + K135 debe ser ~0. Antes se restaba, y con
+    # el pendiente dentro de la posicion eso lo contaba dos veces.
     cn = mec.get("concil") or {}
     ws.cell(135, 4, "Sin conciliar del mes (extracto, con signo)")
     _n(ws, 135, 11, round(float(cn.get("pendiente", 0) or 0), 2))
     ws.cell(136, 4, "Check tras lo sin conciliar")
-    _n(ws, 136, 11, "=+K120-K135")
+    _n(ws, 136, 11, "=+K120+K135")
     ws.cell(137, 4, "(si esto no es ~0, hay movimientos que faltan: "
                     "díselo al panel)")
     ws.cell(137, 12).font = f_gris
