@@ -247,6 +247,200 @@ def bloque_cuadre_proyeccion(filas, etiquetas):
                   "Unlevered FCF", "Saldo final", "Check"], f, clases=cl)
 
 
+def pantalla_nacho(rn, fc, meta):
+    """
+    LA PANTALLA DE LA REUNION. Una pregunta arriba, cinco cifras debajo, y
+    los graficos que las sostienen. Cabe entera en un portatil: nada de
+    scroll, porque en una pantalla compartida el scroll es donde se pierde
+    la conversacion. Todo el detalle vive en ventanas que se abren encima.
+    """
+    if not rn:
+        return ""
+    col = float(rn["colchon"])
+    ok = rn["llega"] and rn["cierre_mes"] >= col
+
+    def cifra(v):
+        return f'<span class="{"neg" if v < 0 else ""}">{eur(v)}</span>'
+
+    # --- la banda de respuesta -----------------------------------------
+    if not rn["llega"]:
+        banda_cls, cabeza = "no", "NO. Hay que tirar de póliza"
+        sub = (f'El cierre proyectado de {esc(rn["etiqueta_mes"])} es '
+               f'{eur(rn["cierre_mes"])}. Con {eur(rn["polizas"])} de póliza '
+               f'libre se cubre, pero se dispone.')
+    elif rn["cierre_mes"] < col:
+        banda_cls, cabeza = "justo", "SÍ, pero justo"
+        sub = (f'Cierre proyectado {eur(rn["cierre_mes"])}, por debajo del '
+               f'colchón de {eur(col)}. Margen {eur(rn["holgura"])}.')
+    else:
+        banda_cls, cabeza = "si", "SÍ, sin tocar la póliza"
+        sub = (f'Cierre proyectado {eur(rn["cierre_mes"])}, '
+               f'{eur(rn["holgura"])} por encima del colchón de {eur(col)}.')
+    peor = ""
+    if rn["peor_saldo"] < col:
+        peor = (f' <b>El punto flojo es {esc(rn["peor_mes"])}: '
+                f'{eur(rn["peor_saldo"])}.</b>')
+    banda = (f'<div class="nq {banda_cls}">'
+             f'<div class="nq-p">{esc(rn["pregunta"])}</div>'
+             f'<div class="nq-r">{esc(cabeza)}</div>'
+             f'<div class="nq-s">{sub}{peor}</div></div>')
+
+    # --- los cinco numeros ----------------------------------------------
+    def nk(t, v, n, estado="", det=""):
+        b = (f' <button class="mas" data-m="{det}">ver</button>' if det else "")
+        return (f'<div class="nk {estado}"><div class="nk-t">{esc(t)}</div>'
+                f'<div class="nk-v">{v}</div>'
+                f'<div class="nk-n">{n}{b}</div></div>')
+
+    est_pos = "" if rn["saldo_hoy"] >= col else "malo"
+    nota_pos = f'+ {eur(rn["polizas"])} de póliza = {eur(rn["liquidez"])} disponibles'
+    kpis = "".join([
+        nk("Posición de tesorería hoy", eur(rn["saldo_hoy"]), nota_pos,
+           est_pos, "m-bancos"),
+        nk(f'Unlevered {esc(rn["etiqueta_mes"])} · llevamos',
+           cifra(rn["unlev_mes_ej"]),
+           f'levered {eur(rn["levered_mes"])} · deuda {eur(rn["deuda_mes"])}',
+           "malo" if rn["unlev_mes_ej"] < 0 else "", "m-puente"),
+        nk(f'Unlevered {esc(rn["etiqueta_mes"])} · proyectado',
+           cifra(rn["unlev_mes_proy"]),
+           f'pendiente del mes {eur(rn["unlev_mes_pdte"])}',
+           "malo" if rn["unlev_mes_proy"] < 0 else ""),
+        nk(f'Unlevered YTD {esc(rn["ano"])} · llevamos', cifra(rn["unlev_ytd_ej"]),
+           f'{len(rn["meses_cerrados"])} meses cerrados + lo que va de mes',
+           "malo" if rn["unlev_ytd_ej"] < 0 else "", "m-ytd"),
+        nk(f'Unlevered YTD · proyectado', cifra(rn["unlev_ytd_proy"]),
+           f'con los 3 meses siguientes {eur(rn["unlev_ytd_mas3"])}',
+           "malo" if rn["unlev_ytd_proy"] < 0 else "", "m-prox"),
+    ])
+
+    # --- grafico 1: de hoy al cierre ------------------------------------
+    L0 = fc["lineas"][fc["meses"][0]]
+    pasos = [("Cobros", L0["cash_in"]), ("Pagos", L0["cash_out"])]
+
+    def _flex(svg, alto):
+        """El grafico llena la tarjeta en vez de dejar un hueco debajo."""
+        return svg.replace(f'height="{alto}"',
+                           'height="100%" preserveAspectRatio="xMidYMid meet"')
+
+    g1 = _flex(waterfall(rn["saldo_hoy"], pasos, ancho=430, alto=300), 300)
+
+    # --- grafico 2: el puente, que es su check --------------------------
+    f_p = [["Variación de bancos (tesorería)", cifra(rn["levered_mes"])],
+           ["&nbsp;&nbsp;<i>de la que está sin conciliar</i>",
+            f'<i>{eur(rn["check_pendiente"])}</i>'],
+           ["<b>= LEVERED</b>", f'<b>{cifra(rn["levered_mes"])}</b>'],
+           ["Pagos de deuda (por arriba)", cifra(rn["deuda_mes"])],
+           ["<b>= UNLEVERED</b>", f'<b>{cifra(rn["unlev_mes_ej"])}</b>']]
+    chk = ('<span class="chip ok">cuadra</span>' if rn["check_ok"]
+           else f'<span class="chip crit">{eur(rn["check_resto"])} sin explicar</span>')
+    g2 = (tabla(["El puente", "Importe"], f_p, alineacion=["", "r"],
+                clases=["", "", "sub", "", "total"])
+          + f'<p class="nn">Movimientos del banco, conciliados y sin '
+            f'conciliar, contra la diferencia de saldos: {chk}</p>')
+
+    # --- grafico 3: los tres meses siguientes ---------------------------
+    if rn["proximos"]:
+        et3 = [p["etiqueta"][:3] for p in rn["proximos"]]
+        g3 = _flex(barras_agrupadas(
+            et3, [("Unlevered proyectado", P["s1"],
+                   [p["unlevered"] for p in rn["proximos"]]),
+                  ("Saldo a cierre", P["s3"],
+                   [p["saldo"] for p in rn["proximos"]])],
+            ancho=430, alto=300), 300)
+    else:
+        g3 = '<p class="vacio">Sin horizonte proyectado.</p>'
+
+    # --- cobros: los tres estados y el mapeo 1/2/3 ----------------------
+    c = rn["cobros"]
+    tot_c = (c["cobrado"] + c["vencido"] + c["sin_vencer"]) or 1
+    venc_mal = c["vencido"] > rn["max_vencido"]
+    barra = (f'<div class="bstack">'
+             f'<i style="width:{c["cobrado"]/tot_c*100:.1f}%;background:{P["s3"]}"></i>'
+             f'<i style="width:{c["vencido"]/tot_c*100:.1f}%;background:{P["crit"]}"></i>'
+             f'<i style="width:{c["sin_vencer"]/tot_c*100:.1f}%;background:{P["s4"]}"></i>'
+             f'</div>'
+             f'<div class="bleg">'
+             f'<span><i style="background:{P["s3"]}"></i>Cobrado {eur(c["cobrado"])}</span>'
+             f'<span class="{"rojo" if venc_mal else ""}">'
+             f'<i style="background:{P["crit"]}"></i>Vencido {eur(c["vencido"])}</span>'
+             f'<span><i style="background:{P["s4"]}"></i>Sin vencer {eur(c["sin_vencer"])}</span>'
+             f'</div>')
+    cert = rn.get("certidumbre") or {}
+    if cert:
+        cols = {1: P["s3"], 2: P["s4"], 3: P["crit"]}
+        barra += ('<div class="bleg map">'
+                  + "".join(
+                      f'<span><i style="background:{cols.get(k, P["muted"])}"></i>'
+                      f'<b>{k}</b> {esc(v["nombre"].replace("Cobros ", ""))} '
+                      f'{eur(v["importe"])}</span>'
+                      for k, v in sorted(cert.items()))
+                  + '</div>')
+
+    # --- las ventanas de detalle ----------------------------------------
+    pc = rn.get("por_cuenta") or []
+    m_bancos = tabla(
+        ["Cuenta", "Inicio", "Hoy", "Variación", "Contabilidad dice", "Δ"],
+        [[esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
+          cifra(x["variacion"]),
+          "" if x.get("contable") is None else eur(x["contable"]),
+          "" if x.get("dif_conta") is None else
+          (f'<span class="rojo">{eur(x["dif_conta"])}</span>'
+           if abs(x["dif_conta"]) > 50 else '<span class="chip ok">0</span>')]
+         for x in pc]
+        + [["<b>Total</b>", f'<b>{eur(sum(x["inicio"] for x in pc))}</b>',
+            f'<b>{eur(sum(x["hoy"] for x in pc))}</b>',
+            f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', "", ""]],
+        alineacion=["", "r", "r", "r", "r", "r"],
+        clases=[""] * len(pc) + ["total"])
+    m_puente = (tabla(["Cuenta", "Nombre", "Importe"],
+                      [[f'<code>{esc(x["cuenta"])}</code>',
+                        esc(x["nombre"] or "deuda"), cifra(x["importe"])]
+                       for x in (rn.get("detalle_deuda") or [])] or
+                      [["", "<i>sin pagos de deuda este mes</i>", ""]],
+                      alineacion=["", "", "r"]))
+    m_ytd = tabla(["Mes", "Levered", "Deuda", "Unlevered"],
+                  [[esc(x["etiqueta"]), cifra(x["levered"]), cifra(x["deuda"]),
+                    f'<b>{cifra(x["unlevered"])}</b>']
+                   for x in rn["meses_cerrados"]]
+                  + [[f'<b>{esc(rn["etiqueta_mes"])} (en curso)</b>',
+                      cifra(rn["levered_mes"]), cifra(rn["deuda_mes"]),
+                      f'<b>{cifra(rn["unlev_mes_ej"])}</b>'],
+                     ["<b>YTD</b>", "", "",
+                      f'<b>{cifra(rn["unlev_ytd_ej"])}</b>']],
+                  alineacion=["", "r", "r", "r"],
+                  clases=[""] * (len(rn["meses_cerrados"]) + 1) + ["total"])
+    m_prox = tabla(["Mes", "Unlevered proyectado", "Saldo a cierre"],
+                   [[esc(rn["etiqueta_mes"]) + " (en curso)",
+                     cifra(rn["unlev_mes_proy"]), eur(rn["cierre_mes"])]]
+                   + [[esc(p["etiqueta"]), cifra(p["unlevered"]),
+                       (f'<span class="rojo">{eur(p["saldo"])}</span>'
+                        if p["saldo"] < col else eur(p["saldo"]))]
+                      for p in rn["proximos"]],
+                   alineacion=["", "r", "r"])
+    modales = "".join(
+        f'<div class="modal" id="{i}"><div class="mbox">'
+        f'<button class="mx" data-x="{i}">×</button>'
+        f'<h3>{esc(t)}</h3>{cuerpo}</div></div>'
+        for i, t, cuerpo in [
+            ("m-bancos", "La posición, banco a banco", m_bancos),
+            ("m-puente", "Los pagos de deuda del mes", m_puente),
+            ("m-ytd", "El unlevered mes a mes", m_ytd),
+            ("m-prox", "El mes en curso y los tres siguientes", m_prox)])
+
+    return f'''
+  <div class="nacho">
+    {banda}
+    <div class="nkpis">{kpis}</div>
+    <div class="ngrid">
+      <div class="ncard"><h3>De hoy al cierre de {esc(rn["etiqueta_mes"])}</h3>{g1}</div>
+      <div class="ncard"><h3>Del levered al unlevered</h3>{g2}</div>
+      <div class="ncard"><h3>Los tres meses siguientes</h3>{g3}</div>
+      <div class="ncard ancho"><h3>Cobros: cobrado · vencido · sin vencer
+       <span class="nn2">y el mapeo 1 / 2 / 3</span></h3>{barra}</div>
+    </div>
+  </div>{modales}'''
+
+
 def detalle_desplegable(grupos, cabeceras, alineacion=None, vacio="Sin movimientos."):
     """
     Una fila por tercero que se despliega y muestra sus facturas.
@@ -1787,6 +1981,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
      {eur(mec["saldo_cierre"])}</b>.</p>
   </section>'''
 
+    # la pantalla de la reunion: primera pestana, una sola pregunta
+    t_nacho = pantalla_nacho(meta.get("resumen_nacho"), fc, meta)
+    if not t_nacho:
+        t_nacho = ('<p class="vacio">Sin datos suficientes para el resumen '
+                   'de reunión: hace falta el extracto bancario.</p>')
+
     cuadre_proy = bloque_cuadre_proyeccion(meta.get("cuadre_proyeccion") or [], etiquetas)
     # Aviso a toda pantalla si los datos de origen no son creibles. Un fallo
     # silencioso de Holded produciria un forecast con pinta de correcto, y eso
@@ -2037,6 +2237,102 @@ summary{{cursor:pointer;font-size:13px;color:{P['ink2']};font-weight:600;padding
 .banner b{{display:block;margin-bottom:6px;font-size:15px}}
 .banner ul{{margin:6px 0;padding-left:22px}}
 .banner span{{display:block;margin-top:8px;font-weight:600}}
+/* ---- LA PANTALLA DE NACHO: cabe entera, sin scroll --------------------
+   Se dimensiona con la altura de la ventana (dvh, que en movil descuenta
+   la barra del navegador) y las tres filas reparten lo que quede. Si la
+   pantalla es pequena de verdad, se deja fluir en vez de recortar: mejor
+   scroll que un numero cortado por la mitad. */
+/* La altura no se calcula restando constantes -el header cambia de alto
+   segun haya banner o no-: la pagina entera se vuelve una columna flex de
+   una ventana de alto y la pantalla se queda con lo que sobre. */
+body.reunion .wrap{{display:flex;flex-direction:column;min-height:100dvh;
+ padding-bottom:0}}
+body.reunion .pie{{display:none}}
+body.reunion #p0.panel.visible{{display:flex;flex-direction:column;
+ flex:1 1 auto;min-height:0}}
+.nacho{{display:flex;flex-direction:column;gap:10px;flex:1 1 auto;
+ min-height:500px}}
+.nacho .chart{{margin:0;flex:1 1 auto;min-height:0}}
+@media(max-width:900px){{.nacho{{min-height:0}}}}
+ .bleg{{font-size:11.5px}}
+}}
+.nq{{border-radius:12px;padding:12px 18px;display:grid;
+ grid-template-columns:1fr auto;align-items:center;gap:4px 20px;flex:0 0 auto}}
+.nq-p{{font-size:13px;font-weight:600;opacity:.75;grid-column:1}}
+.nq-r{{font-size:30px;font-weight:800;letter-spacing:-.5px;grid-row:1/3;
+ grid-column:2;text-align:right;line-height:1.05}}
+.nq-s{{font-size:13.5px;grid-column:1;line-height:1.45}}
+.nq.si{{background:#e6f5e6;color:#0d5c0d}}
+.nq.justo{{background:#fdf4e2;color:#7a5200}}
+.nq.no{{background:#fbe6e6;color:#8f1d1d}}
+.nkpis{{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;flex:0 0 auto}}
+.nk{{background:{P['surface']};border:1px solid {P['border']};border-radius:11px;
+ padding:10px 13px;border-top:3px solid {P['brand']};min-width:0}}
+.nk.malo{{border-top-color:{P['crit']}}}
+.nk.malo .nk-v{{color:{P['crit']}}}
+.nk-t{{font-size:11.5px;color:{P['ink2']};font-weight:600;line-height:1.25;
+ min-height:29px}}
+.nk-v{{font-size:25px;font-weight:800;letter-spacing:-.6px;margin:3px 0 2px;
+ font-variant-numeric:tabular-nums;white-space:nowrap}}
+.nk-n{{font-size:11px;color:{P['muted']};line-height:1.35}}
+.mas{{appearance:none;border:0;background:none;color:{P['s1']};font-weight:700;
+ font-size:11px;cursor:pointer;padding:0 0 0 4px;font-family:inherit}}
+.mas:hover{{text-decoration:underline}}
+.ngrid{{display:grid;grid-template-columns:repeat(3,1fr);
+ grid-template-rows:1fr auto;gap:10px;flex:1 1 auto;min-height:0}}
+.ncard{{background:{P['surface']};border:1px solid {P['border']};border-radius:11px;
+ padding:9px 13px 6px;min-width:0;overflow:hidden;display:flex;
+ flex-direction:column}}
+.ncard.ancho{{grid-column:1/-1}}
+.ncard h3{{font-size:12px;margin:0 0 4px;color:{P['ink2']};font-weight:700}}
+.ncard .nn2{{font-weight:500;color:{P['muted']}}}
+.ncard table{{margin:0;font-size:12px}}
+.ncard td,.ncard th{{padding:3px 6px}}
+.nn{{font-size:11px;color:{P['muted']};margin:5px 0 0;line-height:1.4}}
+.bstack{{display:flex;height:26px;border-radius:6px;overflow:hidden;margin:6px 0 7px}}
+.bstack i{{display:block}}
+.bleg{{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:{P['ink2']}}}
+.bleg span{{display:flex;align-items:center;gap:6px}}
+.bleg i{{width:10px;height:10px;border-radius:3px;display:inline-block}}
+.bleg.map{{margin-top:7px;font-size:11.5px;color:{P['muted']}}}
+.modal{{position:fixed;inset:0;background:rgba(20,22,24,.45);z-index:60;
+ display:none;align-items:center;justify-content:center;padding:24px}}
+.modal.abierto{{display:flex}}
+.mbox{{background:#fff;border-radius:13px;padding:20px 24px;max-width:900px;
+ width:100%;max-height:82vh;overflow:auto;position:relative}}
+.mbox h3{{margin:0 0 12px;font-size:16px;color:{P['brand']}}}
+.mx{{position:absolute;top:12px;right:16px;appearance:none;border:0;
+ background:none;font-size:26px;line-height:1;color:{P['muted']};cursor:pointer}}
+/* En un portatil de 768 de alto todo se compacta un punto antes que
+   aparezca el scroll: mejor apretado que partido en dos pantallas. */
+@media(max-height:860px){{
+ .nacho{{gap:8px;min-height:0}}
+ .nq{{padding:9px 16px}} .nq-p{{font-size:12px}} .nq-r{{font-size:25px}}
+ .nq-s{{font-size:12.5px}}
+ .nk{{padding:8px 11px}} .nk-t{{font-size:11px;min-height:26px}}
+ .nk-v{{font-size:21px}} .nk-n{{font-size:10.5px}}
+ .ncard{{padding:7px 11px 5px}} .ncard table{{font-size:11.5px}}
+ .ncard td,.ncard th{{padding:2px 5px}}
+ .bstack{{height:22px;margin:5px 0}} .bleg{{font-size:11.5px}}
+ .nn{{font-size:10.5px;line-height:1.3}}
+ /* la cabecera tambien cede: en la reunion lo que importa es el numero,
+    no el logo. Solo en la pestana de reunion y solo si hace falta. */
+ body.reunion .marca{{padding:12px 20px}}
+ body.reunion .wordmark{{font-size:21px;letter-spacing:5px}}
+ body.reunion .claim{{font-size:9.5px}}
+ body.reunion .doc{{font-size:14px}} body.reunion .doc2{{font-size:11px}}
+ body.reunion .tira{{padding:6px 20px;margin-bottom:14px}}
+ body.reunion .tabs{{margin-bottom:12px}}
+ body.reunion .tab{{padding:8px 14px;font-size:13.5px}}
+}}
+@media(max-height:745px){{
+ .nacho{{gap:6px}}
+ .nq{{padding:7px 14px}} .nq-r{{font-size:22px}} .nq-s{{font-size:12px}}
+ .nk{{padding:6px 10px}} .nk-t{{font-size:10.5px;min-height:24px}}
+ .nk-v{{font-size:19px;margin:2px 0 1px}}
+ .ncard{{padding:6px 10px 4px}} .ncard h3{{font-size:11.5px;margin-bottom:2px}}
+ .ngrid{{gap:8px}}
+}}
 .tabs{{display:flex;gap:6px;margin:0 0 20px;border-bottom:2px solid {P['grid']}}}
 .tab{{appearance:none;background:none;border:0;border-bottom:3px solid transparent;
  margin-bottom:-2px;padding:11px 18px;font-size:14.5px;font-weight:600;
@@ -2108,7 +2404,7 @@ tr.fc-det th{{padding:5px 8px;font-size:9.5px}}
 .pie-r{{max-width:660px;text-align:right}}
 code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 </style></head>
-<body><div class="wrap">
+<body class="reunion"><div class="wrap">
 
 <header class="marca">
   <div class="marca-in">
@@ -2137,12 +2433,15 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 {banner}
 
 <nav class="tabs">
-  <button class="tab activa" data-p="p1">Forecast de caja</button>
+  <button class="tab activa" data-p="p0">Reunión · 1 pantalla</button>
+  <button class="tab" data-p="p1">Forecast de caja</button>
   <button class="tab" data-p="p2">Cobros</button>
   <button class="tab" data-p="p3">Pagos</button>
 </nav>
 
-<div id="p1" class="panel visible">
+<div id="p0" class="panel visible">{t_nacho}</div>
+
+<div id="p1" class="panel">
 
   <div class="kpis">{kpis}</div>
 
@@ -2344,12 +2643,37 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 
 <script>
 var MES_ACTUAL = "{m0['mes']}";
+
+// Las ventanas de la pantalla de reunion. El detalle se abre ENCIMA, nunca
+// empujando la pagina: si la pantalla creciera, dejaria de caber en una.
+document.querySelectorAll('.mas').forEach(function (b) {{
+  b.addEventListener('click', function () {{
+    var m = document.getElementById(b.dataset.m);
+    if (m) m.classList.add('abierto');
+  }});
+}});
+function cerrarModales() {{
+  document.querySelectorAll('.modal').forEach(function (m) {{
+    m.classList.remove('abierto');
+  }});
+}}
+document.querySelectorAll('.mx').forEach(function (b) {{
+  b.addEventListener('click', cerrarModales);
+}});
+document.querySelectorAll('.modal').forEach(function (m) {{
+  m.addEventListener('click', function (e) {{ if (e.target === m) cerrarModales(); }});
+}});
+document.addEventListener('keydown', function (e) {{
+  if (e.key === 'Escape') cerrarModales();
+}});
+
 document.querySelectorAll('.tab').forEach(function (b) {{
   b.addEventListener('click', function () {{
     document.querySelectorAll('.tab').forEach(function (x) {{ x.classList.remove('activa'); }});
     document.querySelectorAll('.panel').forEach(function (x) {{ x.classList.remove('visible'); }});
     b.classList.add('activa');
     document.getElementById(b.dataset.p).classList.add('visible');
+    document.body.classList.toggle('reunion', b.dataset.p === 'p0');
     window.scrollTo({{ top: 0, behavior: 'smooth' }});
   }});
 }});

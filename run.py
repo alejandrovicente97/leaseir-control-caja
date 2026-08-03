@@ -165,6 +165,8 @@ def main() -> None:
                 for x in m.serie_unlevered(11)
                 if str(x.get("mes", ""))[:4] == (args.mes or f"{date.today():%Y%m}")[:4]),
             "mes_en_curso": m.mes_en_curso(fc),
+            # la pantalla de la reunion con Nacho: una pregunta y cinco cifras
+            "resumen_nacho": m.resumen_nacho(fc),
             "caja_naturaleza": m.caja_por_naturaleza(),
             "serie_unlevered": m.serie_unlevered(6),
             "serie_fcf": m.serie_fcf(6),

@@ -785,6 +785,12 @@ class MotorCaja:
         posicion: una linea de credito no es caja y una tarjeta es deuda.
         """
         mes = mes or self.mes
+        # se pide el mismo mes desde la serie, el resumen y el cuadre: sin
+        # cache son quince recorridos del extracto por ejecucion
+        if getattr(self, "_bk", None) is None:
+            self._bk = {}
+        if mes in self._bk:
+            return self._bk[mes]
         mov, ban = self.d.get("movimientos"), self.d.get("bancos")
         if mov is None or mov.empty or ban is None or ban.empty:
             return None
@@ -1076,7 +1082,7 @@ class MotorCaja:
                         for k, v in dd.groupby(["cta", "nom"])["importe"].sum()
                                       .sort_values().items()]
 
-        return {
+        self._bk[mes] = {
             "mes": mes, "etiqueta": nombre_mes(mes),
             "origen_inicio": origen_inicio,
             "desajuste": desajuste,
@@ -1098,6 +1104,113 @@ class MotorCaja:
             "detalle_deuda": det_deuda,
             "n_movimientos": int(len(del_mes)),
             "por_cuenta": por_cuenta,
+        }
+        return self._bk[mes]
+
+    def resumen_nacho(self, fc: dict) -> dict | None:
+        """
+        UNA PANTALLA, UNA PREGUNTA: llegamos a fin de mes sin tirar de poliza?
+
+        Y debajo, lo unico que Nacho pregunta despues: que unlevered llevamos
+        -del mes y del ano- y como se proyecta el mes, el ano y los tres
+        meses siguientes. Todo lo demas del panel es el detalle que sostiene
+        estas cifras; aqui van solo ellas.
+
+        El unlevered ejecutado NO se recalcula por otro camino: es el mismo
+        de la serie -variacion de tesoreria menos pagos de deuda-, para que
+        dos sitios del panel no puedan decir dos numeros distintos.
+        """
+        if not fc or not fc.get("meses"):
+            return None
+        m0 = fc["lineas"][fc["meses"][0]]
+        bk = self.fcf_desde_banco()
+        if not bk:
+            return None
+
+        # --- unlevered: lo que llevamos y lo que se proyecta ---------------
+        ej_mes = float(bk["unlevered"])
+        pdte_mes = float(m0["fcf"])          # el forecast no proyecta deuda
+        ano = str(self.mes)[:4]
+        cerrados = []
+        for i in range(1, int(str(self.mes)[4:])):
+            b = self.fcf_desde_banco(f"{ano}{i:02d}")
+            if b and (abs(b["levered"]) > 0.005 or abs(b["deuda"]) > 0.005):
+                cerrados.append({"mes": b["mes"], "etiqueta": b["etiqueta"],
+                                 "unlevered": float(b["unlevered"]),
+                                 "levered": float(b["levered"]),
+                                 "deuda": float(b["deuda"])})
+        ytd_ej = float(sum(x["unlevered"] for x in cerrados)) + ej_mes
+
+        # --- los tres meses siguientes -------------------------------------
+        prox = []
+        for m in fc["meses"][1:4]:
+            L = fc["lineas"][m]
+            prox.append({"mes": m, "etiqueta": L["etiqueta"],
+                         "unlevered": float(L["fcf"]),
+                         "saldo": float(L["saldo_proyectado"])})
+
+        saldo_hoy = float(fc["saldo_actual"])
+        cierre_mes = saldo_hoy + pdte_mes
+        pol = float(fc.get("polizas_disponible") or 0.0)
+
+        # --- LA PREGUNTA ----------------------------------------------------
+        # Se responde con el peor momento, no con el final: un mes puede
+        # cerrar bien habiendo pasado por debajo de cero a mitad. Con el
+        # detalle mensual que hay, el peor punto conocido es el cierre de
+        # cada mes; se dice asi y no se disfraza de precision diaria.
+        al = self.cfg.get("alertas") or {}
+        colchon = float(al.get("colchon_minimo", 100_000))
+        max_venc = float(al.get("cobros_vencidos_max", 300_000))
+        peor = min([(cierre_mes, m0["etiqueta"])]
+                   + [(p["saldo"], p["etiqueta"]) for p in prox])
+        llega = cierre_mes >= 0
+        holgura = cierre_mes - colchon
+
+        # --- cobros: cobrado / vencido / sin vencer, y el mapeo 1-2-3 ------
+        v = self.cobros_por_factura()
+        cob = {"cobrado": 0.0, "vencido": 0.0, "sin_vencer": 0.0}
+        cert = {}
+        if v is not None and not v.empty:
+            cob["cobrado"] = float(v["liquidado"].sum())
+            cob["vencido"] = float((v["teorico_hoy"] - v["liquidado"])
+                                   .clip(lower=0).sum())
+            cob["sin_vencer"] = float(
+                (v["total"] - v[["teorico_hoy", "liquidado"]].max(axis=1))
+                .clip(lower=0).sum())
+            col = f"teorico_{self.mes}"
+            if col in v.columns and "certidumbre" in v.columns:
+                nom = ((self.cfg.get("certidumbre") or {}).get("cobros")
+                       or {1: "Seguros", 2: "Posibles", 3: "Retrasados"})
+                for k, x in v.groupby("certidumbre")[col].sum().items():
+                    if abs(float(x)) < 0.005:
+                        continue
+                    cert[int(k)] = {"importe": float(x),
+                                    "nombre": str(nom.get(int(k), f"grupo {k}"))}
+
+        # --- el check, en una linea ----------------------------------------
+        cu = self.cuadre()
+        resto = float(cu.get("resto_conciliar", cu.get("diferencia", 0)) or 0)
+        tol = float(cu.get("tolerancia", 1) or 1)
+        return {
+            "pregunta": "¿Llegamos a fin de mes sin tirar de póliza?",
+            "llega": bool(llega),
+            "holgura": holgura, "colchon": colchon,
+            "peor_saldo": peor[0], "peor_mes": peor[1],
+            "saldo_hoy": saldo_hoy, "cierre_mes": cierre_mes,
+            "polizas": pol, "liquidez": saldo_hoy + pol,
+            "contable": self._cc.get("contable") if getattr(self, "_cc", None) else None,
+            "etiqueta_mes": m0["etiqueta"], "ano": ano,
+            "unlev_mes_ej": ej_mes, "unlev_mes_pdte": pdte_mes,
+            "unlev_mes_proy": ej_mes + pdte_mes,
+            "unlev_ytd_ej": ytd_ej, "unlev_ytd_proy": ytd_ej + pdte_mes,
+            "unlev_ytd_mas3": ytd_ej + pdte_mes + sum(p["unlevered"] for p in prox),
+            "meses_cerrados": cerrados, "proximos": prox,
+            "levered_mes": float(bk["levered"]), "deuda_mes": float(bk["deuda"]),
+            "detalle_deuda": bk.get("detalle_deuda") or [],
+            "cobros": cob, "certidumbre": cert, "max_vencido": max_venc,
+            "check_resto": resto, "check_ok": abs(resto) <= tol,
+            "check_pendiente": float(cu.get("pendiente_neto", 0) or 0),
+            "por_cuenta": bk.get("por_cuenta") or [],
         }
 
     def unlevered_ejecutado(self, mes: str | None = None) -> dict | None:

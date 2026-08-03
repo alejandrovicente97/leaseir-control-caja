@@ -643,6 +643,16 @@ certidumbre:
   dias_retraso: 0
 
 # ---------------------------------------------------------------------------
+# 4.b UMBRALES DE LA PANTALLA DE NACHO
+#     Lo que pinta en rojo. Estan aqui y no dentro del codigo porque son
+#     criterio de direccion, no calculo: el dia que el colchon deje de ser
+#     100.000 se cambia esta linea y el panel entero cambia con ella.
+# ---------------------------------------------------------------------------
+alertas:
+  colchon_minimo: 100000        # saldo proyectado por debajo -> rojo
+  cobros_vencidos_max: 300000   # vencido y sin cobrar por encima -> rojo
+
+# ---------------------------------------------------------------------------
 # 5. CUADRE DE CAJA
 # ---------------------------------------------------------------------------
 cuadre:
@@ -707,7 +717,10 @@ cuadre:
 # 6. FORECAST
 # ---------------------------------------------------------------------------
 forecast:
-  meses_adelante: 2           # M0 + M+1 + M+2
+  # M0 + M+1 + M+2 + M+3. Tres meses por delante porque es lo que Nacho
+  # pregunta en la reunion: "como se proyecta el unlevered del mes, del YTD
+  # y de los proximos tres meses".
+  meses_adelante: 3
   # Los pagos a proveedor se acumulan por fecha de vencimiento: el forecast del
   # mes X incluye TODO lo pendiente con vencimiento <= fin de X (arrastra vencidos)
   arrastrar_vencidos: true
