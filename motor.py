@@ -584,6 +584,109 @@ class MotorCaja:
                                 "variacion": v}
         return salida
 
+    def _clasificar_pendientes(self) -> list[dict]:
+        """
+        Cada movimiento del extracto "sin conciliar" es una de TRES cosas, y
+        sumarlas todas a la posicion -que es lo que se hizo primero- infla
+        la caja con dinero que ya estaba contado. Lo canto Alejandro con la
+        Santander 2600: el panel le sumaba 341.943 de cobros "pendientes"
+        que en realidad ya estaban en el libro diario; en Holded solo
+        faltaba el click de conciliarlos, y la cuenta salia el doble.
+
+          - 'pendiente': no hay apunte en el diario que le corresponda.
+            Es lo que de verdad le falta a contabilidad y lo UNICO que se
+            suma a la posicion.
+          - 'apuntado': hay una linea del diario en la misma cuenta
+            contable, por el mismo importe, a pocos dias, que ningun otro
+            movimiento del feed reclama. El apunte existe; conciliar es
+            tarea administrativa, no dinero nuevo.
+          - 'duplicado': el feed trae el mismo movimiento dos veces y una
+            copia ya esta conciliada. La copia suelta tampoco es dinero.
+
+        El casado es por (cuenta contable, importe exacto) con ventana de
+        dias, y cada linea del diario se consume una sola vez, dando
+        prioridad a los movimientos ya conciliados: si un apunte ya tiene
+        su movimiento casado en Holded, no puede servir de coartada a otro.
+        """
+        if getattr(self, "_pend_cls", None) is not None:
+            return self._pend_cls
+        self._pend_cls = []
+        mv, ban = self.d.get("movimientos"), self.d.get("bancos")
+        if (mv is None or mv.empty or "sin_conciliar" not in mv.columns
+                or ban is None or ban.empty):
+            return self._pend_cls
+        ctas = set(ban[ban["tipo"] == "cuenta"]["cuenta"])
+        mapa_conta = {}
+        if "cta_conta" in ban.columns:
+            mapa_conta = {r["cuenta"]: str(r["cta_conta"])
+                          for _, r in ban.iterrows() if r.get("cta_conta")}
+        mm = mv[mv["cuenta"].isin(ctas)].copy()
+        if mm.empty:
+            return self._pend_cls
+        mm = mm[mm["fecha"].notna()]
+
+        cfg_c = self.cfg.get("cuadre") or {}
+        d_twin = int(cfg_c.get("dias_casar_diario", 7))
+        d_dup = int(cfg_c.get("dias_duplicado_feed", 2))
+
+        # las lineas de caja del diario, cuenta a cuenta e importe a importe:
+        # el pool contra el que se casa. Sin el asiento de apertura, que no
+        # es un movimiento.
+        pool: dict[tuple, list] = {}
+        dia = self.d.get("diario")
+        if dia is not None and not dia.empty:
+            d57 = self._sin_apertura(dia)
+            d57 = d57[d57["cuenta"].astype(str).str.match(PREF_CAJA)]
+            for _, r in d57.iterrows():
+                if pd.isna(r["fecha"]):
+                    continue
+                k = (str(r["cuenta"]), round(float(r["importe"]), 2))
+                pool.setdefault(k, []).append(r["fecha"])
+        for v in pool.values():
+            v.sort()
+
+        def consumir(cta_conta, imp, fecha, dias):
+            lst = pool.get((cta_conta, round(imp, 2)))
+            if not lst:
+                return False
+            difs = [(abs((f - fecha).days), i) for i, f in enumerate(lst)]
+            d, i = min(difs)
+            if d <= dias:
+                lst.pop(i)
+                return True
+            return False
+
+        # 1) los ya conciliados reclaman primero su apunte del diario
+        conc = mm[mm["conciliado"].abs() > 0.005] if "conciliado" in mm.columns \
+            else mm.iloc[0:0]
+        for _, r in conc.iterrows():
+            cc = mapa_conta.get(r["cuenta"])
+            if cc:
+                consumir(cc, float(r["importe"]), r["fecha"], d_twin)
+
+        # 2) los sin conciliar, uno a uno
+        cand = mm[mm["sin_conciliar"].abs() > 0.005].sort_values("fecha")
+        for _, r in cand.iterrows():
+            imp = float(r["sin_conciliar"])
+            cc = mapa_conta.get(r["cuenta"])
+            estado = "pendiente"
+            # copia del feed: mismo importe TOTAL, misma cuenta, a <=N dias
+            # de un movimiento que si esta conciliado
+            gem = conc[(conc["cuenta"] == r["cuenta"])
+                       & (conc["importe"].round(2) == round(float(r["importe"]), 2))
+                       & ((conc["fecha"] - r["fecha"]).abs()
+                          <= pd.Timedelta(days=d_dup))]
+            if len(gem):
+                estado = "duplicado"
+            elif cc and consumir(cc, imp, r["fecha"], d_twin):
+                estado = "apuntado"
+            self._pend_cls.append({
+                "cuenta": r["cuenta"], "fecha": r["fecha"],
+                "mes": mes_de(r["fecha"]), "importe": imp,
+                "concepto": str(r.get("concepto") or "")[:80],
+                "estado": estado})
+        return self._pend_cls
+
     def _pend_extracto(self, mes: str) -> tuple[dict, dict]:
         """
         Lo que el extracto bancario tiene y contabilidad todavia no, CON
@@ -597,28 +700,24 @@ class MotorCaja:
         el banco ya vio y el diario aun no tiene apuntado. Es la identidad de
         Alejandro, contabilidad + pendiente = banco, aplicada cuenta a cuenta.
 
-        Solo cuentas corrientes: lo sin conciliar de una tarjeta o una poliza
-        no es posicion bancaria. Y nada posterior a `mes`: el pendiente de
-        agosto no toca la foto de julio.
+        Solo entra lo clasificado como 'pendiente' de verdad: lo que ya esta
+        apuntado y solo falta conciliar, y las copias duplicadas del feed,
+        NO suman (la 2600 llevaba 341.943 de cobros ya contabilizados y la
+        posicion salia inflada). Solo cuentas corrientes: lo sin conciliar
+        de una tarjeta o una poliza no es posicion bancaria. Y nada
+        posterior a `mes`: el pendiente de agosto no toca la foto de julio.
         """
-        mv, ban = self.d.get("movimientos"), self.d.get("bancos")
-        if (mv is None or mv.empty or "sin_conciliar" not in mv.columns
-                or ban is None or ban.empty):
-            return {}, {}
-        ctas = set(ban[ban["tipo"] == "cuenta"]["cuenta"])
-        mm = mv[mv["cuenta"].isin(ctas)
-                & (mv["sin_conciliar"].abs() > 0.005)].copy()
-        if mm.empty:
-            return {}, {}
-        mm["mes"] = mm["fecha"].map(mes_de)
         prev, del_mes = {}, {}
-        for cta, g in mm.groupby("cuenta"):
-            a = float(g[g["mes"] < mes]["sin_conciliar"].sum())
-            b = float(g[g["mes"] == mes]["sin_conciliar"].sum())
-            if abs(a) > 0.005:
-                prev[str(cta)] = a
-            if abs(b) > 0.005:
-                del_mes[str(cta)] = b
+        for x in self._clasificar_pendientes():
+            if x["estado"] != "pendiente":
+                continue
+            cta = str(x["cuenta"])
+            if x["mes"] < mes:
+                prev[cta] = prev.get(cta, 0.0) + x["importe"]
+            elif x["mes"] == mes:
+                del_mes[cta] = del_mes.get(cta, 0.0) + x["importe"]
+        prev = {k: v for k, v in prev.items() if abs(v) > 0.005}
+        del_mes = {k: v for k, v in del_mes.items() if abs(v) > 0.005}
         return prev, del_mes
 
     def _avisar(self, texto: str) -> str:
@@ -791,20 +890,31 @@ class MotorCaja:
                 nombre = nom_t or (x["nombre"] or f"cuenta {cta}")
                 hol = listado_saldo.get(nom_t) if nom_t else None
                 man = _manual_de(nombre)
-                inicio = man if man is not None else x["inicio"] + pp
-                hoy = x["hoy"] + pp + pm
+                if man is not None:
+                    # CON EXTRACTO REAL ESCRITO, EL NIVEL LO PONE EL BANCO:
+                    # apertura real + flujos del mes (diario + pendiente del
+                    # mes). Si el hoy siguiera colgando del saldo contable,
+                    # un error de apuntes de meses pasados viajaria dentro
+                    # del "hoy" y la variacion del mes saldria contaminada.
+                    inicio = man
+                    hoy = man + x["variacion"] + pm
+                    sin_c = pm
+                else:
+                    inicio = x["inicio"] + pp
+                    hoy = x["hoy"] + pp + pm
+                    sin_c = pp + pm
                 fila = {"cuenta": nombre, "cta_contable": cta,
                         "inicio": inicio,
                         "hoy": hoy, "variacion": hoy - inicio,
-                        "contable": x["hoy"], "sin_contab": pp + pm,
+                        "contable": x["hoy"], "sin_contab": sin_c,
                         "n": int((del_mes["cuenta"] == nom_t).sum()) if nom_t else 0,
                         "holded": None if hol is None else float(hol),
                         "dif_holded": (None if hol is None
                                        else float(hol) - hoy)}
                 if man is not None:
                     # (contable + pendiente del extracto) contra el extracto
-                    # REAL escrito a mano: si no es cero, faltan apuntes que
-                    # ni el diario ni el feed del banco estan viendo
+                    # REAL escrito a mano: si no es cero, sobran o faltan
+                    # apuntes que ni el diario ni el feed del banco ven
                     fila["descuadre"] = x["inicio"] + pp - man
                 por_cuenta.append(fila)
             # cuentas de tesoreria con movimientos sin conciliar y SIN cuenta
@@ -820,12 +930,14 @@ class MotorCaja:
                     continue
                 man = _manual_de(cta_t)
                 hol = listado_saldo.get(cta_t)
-                inicio = man if man is not None else pp
-                hoy = pp + pm
+                if man is not None:
+                    inicio, hoy, sin_c = man, man + pm, pm
+                else:
+                    inicio, hoy, sin_c = pp, pp + pm, pp + pm
                 por_cuenta.append({
                     "cuenta": cta_t, "cta_contable": "",
                     "inicio": inicio, "hoy": hoy, "variacion": hoy - inicio,
-                    "contable": 0.0, "sin_contab": pp + pm,
+                    "contable": 0.0, "sin_contab": sin_c,
                     "n": int((del_mes["cuenta"] == cta_t).sum()),
                     "holded": None if hol is None else float(hol),
                     "dif_holded": None if hol is None else float(hol) - hoy})
@@ -889,6 +1001,28 @@ class MotorCaja:
                              "movimientos": int(r["pdte_conciliar"]),
                              "importe": imp})
 
+        # La clasificacion de lo sin conciliar, por cuenta: que parte es
+        # dinero de verdad (pendiente de apuntar, la unica que suma en la
+        # posicion), que parte es papeleo (ya apuntado en el diario, solo
+        # falta el click de conciliar) y que parte es copia duplicada del
+        # feed. Es la respuesta a "la 2600 no puede tener 341.943 mas".
+        cls = [x for x in self._clasificar_pendientes() if x["mes"] <= mes]
+        pend_clases = []
+        if cls:
+            agg = {}
+            for x in cls:
+                a = agg.setdefault(x["cuenta"], {
+                    "cuenta": x["cuenta"],
+                    "apuntado": 0.0, "n_apuntado": 0,
+                    "duplicado": 0.0, "n_duplicado": 0,
+                    "pendiente": 0.0, "n_pendiente": 0})
+                a[x["estado"]] += x["importe"]
+                a[f"n_{x['estado']}"] += 1
+            pend_clases = sorted(
+                agg.values(),
+                key=lambda a: -(abs(a["apuntado"]) + abs(a["duplicado"])
+                                + abs(a["pendiente"])))
+
         # Pagos de deuda del mes, del libro diario: principal (17*, 52*),
         # intereses y gastos financieros (66*, 527).
         deuda, det_deuda, gasto_tarjetas = 0.0, [], 0.0
@@ -932,6 +1066,7 @@ class MotorCaja:
             "origen_inicio": origen_inicio,
             "desajuste": desajuste,
             "pdte_conciliar": pdte,
+            "pend_clases": pend_clases,
             "saldo_inicio": saldo_inicio,
             "saldo_hoy": saldo_hoy,
             "variacion_bancos": variacion_bancos,
@@ -1294,12 +1429,15 @@ class MotorCaja:
                 # contabilidad, CON SIGNO y por cuenta. Es la pieza que faltaba
                 # para comparar las dos cifras: no tienen por que coincidir, y
                 # de hecho no deben, porque se diferencian exactamente en esto.
-                mv = self.d.get("movimientos")
+                # Solo lo clasificado como pendiente DE VERDAD: lo que ya esta
+                # apuntado y solo falta conciliar no es diferencia entre banco
+                # y contabilidad, es papeleo (la 2600 metia aqui 341.943 de
+                # cobros ya contabilizados y el contraste salia absurdo).
+                pp_n, pm_n = self._pend_extracto(self.mes)
                 neto = {}
-                if (mv is not None and not mv.empty
-                        and "sin_conciliar" in mv.columns):
-                    neto = {str(k): float(v) for k, v in
-                            mv.groupby("cuenta")["sin_conciliar"].sum().items()}
+                for d_ in (pp_n, pm_n):
+                    for k, v in d_.items():
+                        neto[str(k)] = neto.get(str(k), 0.0) + v
 
                 vistos = set()
                 if "cta_conta" in b.columns:

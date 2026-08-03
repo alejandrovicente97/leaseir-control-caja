@@ -1320,25 +1320,45 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         # El hueco declarado por Holded entre banco y contabilidad. Cuando el
         # unlevered no cuadra contra el bottom-up, esto es lo primero que hay
         # que mirar, y hasta ahora no se veia en ningun sitio.
-        pdte = bk.get("pdte_conciliar") or []
-        if pdte:
-            tot_p = sum(x["importe"] for x in pdte)
-            tot_n = sum(x["movimientos"] for x in pdte)
+        # Lo sin conciliar, CLASIFICADO. No todo lo que Holded declara sin
+        # conciliar es dinero que falta: la mayor parte suele estar ya
+        # apuntada en el diario (solo falta el click de conciliar) y a veces
+        # el feed trae el mismo movimiento dos veces. Solo lo "pendiente de
+        # apuntar" suma en la posición; enseñar las tres clases separadas es
+        # lo que evita que la 2600 vuelva a salir con 341.943 de más.
+        pcl = bk.get("pend_clases") or []
+        if pcl:
+            t_ap = sum(x["apuntado"] for x in pcl)
+            t_du = sum(x["duplicado"] for x in pcl)
+            t_pe = sum(x["pendiente"] for x in pcl)
+            n_tot = sum(x["n_apuntado"] + x["n_duplicado"] + x["n_pendiente"]
+                        for x in pcl)
+            def _c(v, n):
+                return ('<span class="apagado">—</span>' if n == 0
+                        else f'{eur(v)} <span class="apagado">({n})</span>')
+            f_cl = [[esc(x["cuenta"]),
+                     _c(x["apuntado"], x["n_apuntado"]),
+                     _c(x["duplicado"], x["n_duplicado"]),
+                     _c(x["pendiente"], x["n_pendiente"])]
+                    for x in pcl]
+            f_cl.append([f'<b>Total ({n_tot} movs.)</b>',
+                         f'<b>{eur(t_ap)}</b>', f'<b>{eur(t_du)}</b>',
+                         f'<b>{eur(t_pe)}</b>'])
             t_puente += (
-                f'<div class="nota-cuadre mal" style="margin-top:14px">'
-                f'<b>HAY {tot_n} MOVIMIENTO{"S" if tot_n != 1 else ""} SIN '
-                f'CONCILIAR EN HOLDED</b> — {eur(tot_p)} en total. Están en el '
-                f'banco pero todavía no apuntados. Su importe <b>ya está '
-                f'sumado</b> en la posición y en la variación (columna «Sin '
-                f'contab.»); lo que no se sabe hasta que se concilien es qué '
-                f'son — un cobro, un pago o una cuota de deuda—, así que el '
-                f'reparto por conceptos y los pagos de deuda pueden estar '
-                f'incompletos. Conciliarlos en Holded es lo que afina el '
-                f'detalle.</div>'
-                + tabla(["Cuenta", "Movimientos", "Importe sin conciliar"],
-                        [[esc(x["cuenta"]), f'{x["movimientos"]}',
-                          eur(x["importe"])] for x in pdte],
-                        alineacion=["", "r", "r"]))
+                f'<div class="nota-cuadre {"mal" if abs(t_pe) > 1000 else "ok"}" '
+                f'style="margin-top:14px">'
+                f'<b>SIN CONCILIAR EN HOLDED: {n_tot} MOVIMIENTOS</b> — pero '
+                f'no todo es dinero que falte. <b>Ya apuntado en el diario</b> '
+                f'{eur(t_ap)}: existe el asiento, solo falta conciliarlo, NO '
+                f'suma en la posición (sumarlo la inflaba: la 2600 llevaba '
+                f'341.943 € así). <b>Duplicado del feed</b> {eur(t_du)}: el '
+                f'banco lo trae dos veces, tampoco suma. <b>Pendiente de '
+                f'apuntar de verdad</b> {eur(t_pe)}: esto SÍ está sumado, es '
+                f'la columna «Sin contab.».</div>'
+                + tabla(["Cuenta", "Ya apuntado (no suma)",
+                         "Duplicado feed (no suma)", "Pendiente de apuntar (suma)"],
+                        f_cl, alineacion=["", "r", "r", "r"],
+                        clases=[""] * (len(f_cl) - 1) + ["total"]))
         des = bk.get("desajuste")
         if des is not None and abs(des) > 1:
             t_puente += (
