@@ -817,24 +817,26 @@ class MotorCaja:
         # corregido, los 24.705 de la cuenta de Caixa que Holded declara a cero
         # apareceria como flujo del mes en vez de como saldo que ya estaba.
         variacion = float(del_mes["importe"].sum())
-        # el movimiento del mes segun el EXTRACTO (feed bancario), guardado
-        # aparte: es el segundo check de Alejandro, "que el levered te cuadre
-        # con el movimiento real de la caja". Contra el diario no es un check
-        # (identidad); contra el extracto, si.
+        # el movimiento del mes segun el EXTRACTO (feed bancario). Con la
+        # posicion anclada en tesoreria, el levered ES esto; el check pasa a
+        # ser contra el LIBRO DIARIO, y su diferencia es lo que la
+        # contabilidad todavia no ha apuntado. Ese es ahora el numero que
+        # dice si alguien va por detras, y de cuanto.
         feed_neto = variacion
 
-        # LA POSICION, EN LOS DOS CORTES, SALE DE CONTABILIDAD MAS LO QUE EL
-        # EXTRACTO TIENE SIN CONCILIAR. Ni los saldos del listado de Holded
-        # ni las aperturas del Excel de Alejandro son fotos fechadas: los
-        # rellena el A MANO (los ultimos, el 17/07, de vuelta de vacaciones).
-        # Lo unico de este sistema que lleva fecha de verdad es el libro
-        # diario: asiento de apertura de enero mas movimientos. Pero el
-        # diario va por detras del banco, asi que a cada corte se le suma lo
-        # que el extracto ya vio y el diario aun no tiene apuntado (sin
-        # conciliar, con signo): contabilidad + pendiente = banco, cuenta a
-        # cuenta. El levered es la diferencia entre los dos cortes. El saldo
-        # que declara Holded se ensena AL LADO, como declaracion manual,
-        # nunca dentro de la cuenta.
+        # LA POSICION, EN LOS DOS CORTES, ES LA DE TESORERIA.
+        # Alejandro, 3-ago: "quiero que el inicio sea la tesoreria y el hoy
+        # igual, porque siempre habra cosas sin conciliar". Y es lo correcto:
+        # al banco le da igual si el apunte esta hecho, y esperar a que
+        # contabilidad se ponga al dia significa publicar una caja que no es
+        # la que hay. Asi que:
+        #   HOY    = el saldo que da tesoreria (el del banco).
+        #   INICIO = ese mismo saldo andado hacia atras con los movimientos
+        #            del extracto, mes a mes. No hace falta historico.
+        #   LEVERED = la diferencia, que es el movimiento real de la caja.
+        # Contabilidad deja de ser el ancla y pasa a ser el CONTRASTE: su
+        # diferencia contra el banco es, por definicion, lo que falta por
+        # apuntar o por conciliar, y se ensena en su columna.
         conta = self._saldos_contables_57(mes)
         mapa_teso = {}
         listado_saldo = {}
@@ -864,90 +866,106 @@ class MotorCaja:
                     return v
             return None
 
-        # LO QUE EL BANCO YA VIO Y EL DIARIO AUN NO TIENE APUNTADO, con signo
-        # y por cuenta. Sin esto la posicion se queda congelada: "no mueve las
-        # cajas desde el inicio hasta hoy" (Alejandro, 3-ago), porque los
-        # apuntes de los primeros dias del mes van por detras del banco. La
-        # identidad es la suya: contabilidad + pendiente = banco. Lo anterior
-        # al mes entra en los dos cortes (ya faltaba al abrir y sigue
-        # faltando); lo del mes solo en el de hoy.
-        pend_prev, pend_mes_cta = self._pend_extracto(mes)
-        pend_usado = set()
+        # EL SALDO DE HOY DE CADA CUENTA, SEGUN TESORERIA. Sale del listado
+        # de Holded, que para las cuentas sincronizadas ES el saldo del
+        # banco. Las dos excepciones vienen ya resueltas de _conciliar_caja:
+        # la cuenta que Holded declara a cero teniendo movimiento (se
+        # reconstruye, y se dice) y la que este escrita a mano en config.
+        cc = self._conciliar_caja()
+        teso_hoy = {}
+        for _, r in ban[ban["tipo"] == "cuenta"].iterrows():
+            teso_hoy[str(r["cuenta"])] = {
+                "saldo": float(r["saldo"] or 0.0), "fuente": "tesorería",
+                "cta": str(r.get("cta_conta") or "")}
+        for c in (cc.get("conciliacion") or []):
+            n = str(c.get("cuenta") or "")
+            if not c.get("banco") or n not in teso_hoy:
+                continue
+            if c.get("rescatada"):
+                teso_hoy[n].update(saldo=float(c.get("estimado") or 0.0),
+                                   fuente="reconstruida")
+            elif c.get("manual"):
+                teso_hoy[n].update(saldo=float(c.get("estimado") or 0.0),
+                                   fuente="escrito a mano")
+            if not teso_hoy[n]["cta"] and c.get("num"):
+                teso_hoy[n]["cta"] = str(c["num"])
+
+        # los movimientos del extracto, por cuenta y por mes: con esto se
+        # anda hacia atras desde el saldo de hoy hasta el corte que sea
+        mov_mes = {}
+        if not m.empty:
+            for (n, mm2), v in m.groupby(["cuenta", "mes"])["importe"].sum().items():
+                mov_mes.setdefault(str(n), {})[str(mm2)] = float(v)
 
         por_cuenta = []
-        if conta:
-            for cta, x in sorted(conta.items(), key=lambda kv: kv[1]["variacion"]):
-                nom_t = mapa_teso.get(cta)
-                pp = pm = 0.0
-                if nom_t and nom_t not in pend_usado:
-                    pp = pend_prev.get(nom_t, 0.0)
-                    pm = pend_mes_cta.get(nom_t, 0.0)
-                    pend_usado.add(nom_t)
-                if (abs(x["inicio"]) < 0.005 and abs(x["hoy"]) < 0.005
-                        and abs(x["variacion"]) < 0.005
-                        and abs(pp) < 0.005 and abs(pm) < 0.005):
-                    continue
-                nombre = nom_t or (x["nombre"] or f"cuenta {cta}")
-                hol = listado_saldo.get(nom_t) if nom_t else None
-                man = _manual_de(nombre)
-                if man is not None:
-                    # CON EXTRACTO REAL ESCRITO, EL NIVEL LO PONE EL BANCO:
-                    # apertura real + flujos del mes (diario + pendiente del
-                    # mes). Si el hoy siguiera colgando del saldo contable,
-                    # un error de apuntes de meses pasados viajaria dentro
-                    # del "hoy" y la variacion del mes saldria contaminada.
-                    inicio = man
-                    hoy = man + x["variacion"] + pm
-                    sin_c = pm
+        usadas = set()
+        if teso_hoy or conta:
+            for n, info in teso_hoy.items():
+                cta = info["cta"]
+                x = conta.get(cta) if cta else None
+                if cta:
+                    usadas.add(cta)
+                d = mov_mes.get(n, {})
+                man = _manual_de(n)
+                if d:
+                    # tesoreria pura: hoy del banco, hacia atras con extracto
+                    post = sum(v for k, v in d.items() if k > mes)
+                    dm = float(d.get(mes, 0.0))
+                    hoy = info["saldo"] - post
+                    inicio = man if man is not None else hoy - dm
+                elif x:
+                    # cuenta sin extracto (Holded no la sincroniza): la unica
+                    # pista del movimiento es el diario. Se dice en 'fuente'.
+                    hoy = info["saldo"]
+                    inicio = man if man is not None else hoy - x["variacion"]
                 else:
-                    inicio = x["inicio"] + pp
-                    hoy = x["hoy"] + pp + pm
-                    sin_c = pp + pm
-                fila = {"cuenta": nombre, "cta_contable": cta,
-                        "inicio": inicio,
-                        "hoy": hoy, "variacion": hoy - inicio,
-                        "contable": x["hoy"], "sin_contab": sin_c,
-                        "n": int((del_mes["cuenta"] == nom_t).sum()) if nom_t else 0,
-                        "holded": None if hol is None else float(hol),
-                        "dif_holded": (None if hol is None
-                                       else float(hol) - hoy)}
+                    hoy = info["saldo"]
+                    inicio = man if man is not None else hoy
+                fila = {"cuenta": n, "cta_contable": cta,
+                        "inicio": inicio, "hoy": hoy,
+                        "variacion": hoy - inicio,
+                        "contable": None if x is None else x["hoy"],
+                        "dif_conta": None if x is None else hoy - x["hoy"],
+                        "n": int((del_mes["cuenta"] == n).sum()),
+                        "fuente": info["fuente"] if d else (
+                            info["fuente"] + ", sin extracto"),
+                        "holded": info["saldo"]}
                 if man is not None:
-                    # (contable + pendiente del extracto) contra el extracto
-                    # REAL escrito a mano: si no es cero, sobran o faltan
-                    # apuntes que ni el diario ni el feed del banco ven
-                    fila["descuadre"] = x["inicio"] + pp - man
+                    # extracto REAL escrito contra lo que dice el banco hoy
+                    # andado hacia atras: si no cuadra, o falta movimiento en
+                    # el feed o la cifra escrita es de otro dia
+                    fila["descuadre"] = (hoy - (float(d.get(mes, 0.0))
+                                                if d else 0.0)) - man
                 por_cuenta.append(fila)
-            # cuentas de tesoreria con movimientos sin conciliar y SIN cuenta
-            # contable detras (o sin apunte alguno en el diario): el banco
-            # las conoce, contabilidad no. Es dinero real y se ensena; si se
-            # tirara, el KPI y esta tabla dirian numeros distintos.
-            for cta_t in sorted(set(pend_prev) | set(pend_mes_cta)):
-                if cta_t in pend_usado:
+
+            # cuentas contables de tesoreria sin cuenta de banco detras: la
+            # caja en efectivo, los intereses. No hay extracto que valga, van
+            # con su saldo contable y marcadas como tales.
+            for cta, x in sorted(conta.items(), key=lambda kv: kv[1]["variacion"]):
+                if cta in usadas:
                     continue
-                pp = pend_prev.get(cta_t, 0.0)
-                pm = pend_mes_cta.get(cta_t, 0.0)
-                if abs(pp) < 0.005 and abs(pm) < 0.005:
+                if (abs(x["inicio"]) < 0.005 and abs(x["hoy"]) < 0.005
+                        and abs(x["variacion"]) < 0.005):
                     continue
-                man = _manual_de(cta_t)
-                hol = listado_saldo.get(cta_t)
-                if man is not None:
-                    inicio, hoy, sin_c = man, man + pm, pm
-                else:
-                    inicio, hoy, sin_c = pp, pp + pm, pp + pm
+                nombre = x["nombre"] or f"cuenta {cta}"
+                man = _manual_de(nombre)
                 por_cuenta.append({
-                    "cuenta": cta_t, "cta_contable": "",
-                    "inicio": inicio, "hoy": hoy, "variacion": hoy - inicio,
-                    "contable": 0.0, "sin_contab": sin_c,
-                    "n": int((del_mes["cuenta"] == cta_t).sum()),
-                    "holded": None if hol is None else float(hol),
-                    "dif_holded": None if hol is None else float(hol) - hoy})
+                    "cuenta": nombre, "cta_contable": cta,
+                    "inicio": man if man is not None else x["inicio"],
+                    "hoy": x["hoy"],
+                    "variacion": x["hoy"] - (man if man is not None
+                                             else x["inicio"]),
+                    "contable": x["hoy"], "dif_conta": 0.0, "n": 0,
+                    "fuente": "contable (no es cuenta de banco)",
+                    "holded": None})
+            por_cuenta.sort(key=lambda f: f["variacion"])
             saldo_inicio = float(sum(f["inicio"] for f in por_cuenta))
             saldo_hoy = float(sum(f["hoy"] for f in por_cuenta))
             origen_inicio = ("extracto bancario, escrito a mano "
                              f"({ap_cfg.get('confirmado', 'sin fecha')})"
                              if apert_manual else
-                             "contable (apertura de enero + libro diario) mas "
-                             "lo sin conciliar del extracto, con signo")
+                             "tesorería: saldo del banco de hoy, andado hacia "
+                             "atrás con los movimientos del extracto")
             variacion = saldo_hoy - saldo_inicio
             desajuste = None
         else:
@@ -967,17 +985,14 @@ class MotorCaja:
                 "del listado de Holded, que se rellena a mano y puede ser de "
                 "otro dia.")
         self.aviso_apertura = None
-        if not apert_manual and conta:
+        if not apert_manual and por_cuenta:
             self.aviso_apertura = self._avisar(
-                "Posicion estimada como contabilidad (asiento de apertura de "
-                "enero + libro diario) MAS lo que el extracto tiene sin "
-                "conciliar, con signo. Es tu propia identidad -contabilidad "
-                "+ pendiente = banco- y es lo que hace que la posicion se "
-                "mueva cada dia aunque los apuntes vayan por detras del "
-                "banco. Los saldos del listado de Holded se rellenan a mano "
-                "y quedan al lado como referencia. Cuando tengas el extracto "
-                "real de fin de mes, escribelo en tesoreria.saldos_apertura "
-                "y mandara el.")
+                "La posicion es la de TESORERIA: el saldo del banco de hoy y, "
+                "hacia atras, los movimientos del extracto. Contabilidad no "
+                "manda aqui; va al lado como contraste, y su diferencia es lo "
+                "que falta por apuntar o conciliar. Si el listado de Holded "
+                "de alguna cuenta se rellena a mano, ese saldo es tan bueno "
+                "como el dia en que se toco.")
 
         # EL LEVERED ES LA VARIACION DE BANCOS, SIN ADORNOS. El gasto de
         # tarjeta del mes que vuelca en agosto se informa APARTE: sumarlo al
@@ -1072,6 +1087,10 @@ class MotorCaja:
             "variacion_bancos": variacion_bancos,
             "gasto_tarjeta_mes": gasto_tarjeta_mes,
             "feed_neto": feed_neto,
+            # lo que el libro diario apunto en las 57* ese mes: el contraste
+            # de la variacion de tesoreria. Δ = lo que falta por apuntar.
+            "diario_neto": float(sum(x["variacion"] for x in conta.values()))
+                           if conta else None,
             "levered": variacion,
             "deuda": deuda,
             "gasto_tarjetas": gasto_tarjetas,
@@ -1557,20 +1576,24 @@ class MotorCaja:
                         f"conocidas, asi que no es de fiar. Estan listadas en "
                         f"el contraste con contabilidad.")
 
-        # La cifra que manda es la contable si existe, MAS lo que el extracto
-        # tiene sin conciliar (con signo): contabilidad + pendiente = banco,
-        # la misma identidad de la comprobacion de arriba. Sin el pendiente,
-        # el saldo "de hoy" es el del ultimo apunte del diario y se queda
-        # quieto los dias en que la contabilidad va por detras del banco, que
-        # es la norma a principios de mes. El listado (con su rescate de
-        # cuentas a cero) queda como referencia declarada a mano.
-        pend_caja = 0.0
-        if saldo_contable is not None:
-            pp_e, pm_e = self._pend_extracto(self.mes)
-            pend_caja = float(sum(pp_e.values()) + sum(pm_e.values()))
-            saldo_cta = saldo_contable + pend_caja
+        # LA CIFRA QUE MANDA ES LA DE TESORERIA. Alejandro: "quiero que el
+        # inicio sea la tesoreria y el hoy igual, porque siempre habra cosas
+        # sin conciliar". O sea: el saldo del banco tal cual, mas las cuentas
+        # contables de tesoreria que no tienen banco detras (la caja en
+        # efectivo), que si no desaparecerian de la posicion. La contable
+        # queda guardada al lado para el contraste, nunca como titular.
+        # Se suma EXACTAMENTE lo mismo que suma la tabla banco a banco del
+        # puente: si cada uno contase por su cuenta, el KPI y la tabla
+        # dirian numeros distintos y no habria forma de saber cual creerse.
+        ctas_con_banco = set()
+        if "cta_conta" in b.columns and not b.empty:
+            ctas_con_banco = {str(r.get("cta_conta") or "")
+                              for _, r in b[b["tipo"] == "cuenta"].iterrows()}
+        solo_conta = float(sum(x["hoy"] for k, x in (conta57 or {}).items()
+                               if k not in ctas_con_banco))
+        saldo_cta = saldo_cta + solo_conta
         self._cc = {'saldo': saldo_cta, 'listado': self.saldo_tesoreria,
-                    'contable': saldo_contable, 'pend_caja': pend_caja,
+                    'contable': saldo_contable, 'solo_contable': solo_conta,
                     'conciliacion': concilia, 'rescatado': self.rescatado,
                     'recons_ok': self.recons_ok, 'recons_n': self.recons_n,
                     'caja_contable': caja_conta}
@@ -1781,6 +1804,9 @@ class MotorCaja:
             "saldo_en_polizas": saldo_en_pol, "deuda_tarjetas": deuda_tarjetas,
             "saldo_actual": saldo_cta, "polizas_disponible": disp_pol,
             "saldo_tesoreria": self.saldo_tesoreria,
+            # la contable, ahora que el titular es la de tesoreria: su
+            # diferencia es lo que falta por apuntar, y se dice en el KPI
+            "saldo_contable": cc.get("contable"),
             "caja_contable": caja_conta,
             "conciliacion_caja": concilia,
             "rescatado": self.rescatado,

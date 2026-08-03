@@ -249,10 +249,11 @@ def _hoja_proveedores(wb, dp, pagado_mes_fac):
 def _hoja_bancos(wb, bk, mec):
     ws = wb.create_sheet("Bancos")
     ws.cell(1, 1, "Bottom Up - banco a banco").font = f_tit
-    # Inicio y Hoy = contabilidad + lo sin conciliar del extracto (con signo).
-    # "Sin contab." dice cuanto de cada saldo es extracto aun sin apuntar.
+    # Inicio y Hoy son TESORERIA: el saldo del banco de hoy y ese saldo
+    # andado hacia atras con el extracto. "Contabilidad" al lado, y su Δ es
+    # lo que falta por apuntar o conciliar en esa cuenta.
     _cab(ws, 3, ["Cuenta", "Al empezar el mes", "Hoy", "Variación",
-                 "Sin contab.", "Movs"])
+                 "Contabilidad", "Movs"])
     f = 4
     pc = (bk or {}).get("por_cuenta") or []
     for x in pc:
@@ -260,7 +261,8 @@ def _hoja_bancos(wb, bk, mec):
         _n(ws, f, 2, round(x["inicio"], 2))
         _n(ws, f, 3, round(x["hoy"], 2))
         _n(ws, f, 4, f"=C{f}-B{f}")
-        _n(ws, f, 5, round(float(x.get("sin_contab") or 0), 2))
+        _n(ws, f, 5, (None if x.get("contable") is None
+                      else round(float(x["contable"]), 2)))
         ws.cell(f, 6, x["n"])
         f += 1
     if pc:

@@ -455,10 +455,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     # la posicion es contable (libro diario); lo que Holded declara a mano se
     # dice al lado, con su diferencia, para que nadie confunda las dos fotos
-    st = fc.get("saldo_tesoreria")
-    if st is not None and abs(st - fc["saldo_actual"]) > 1:
-        nota_pol = (f"libro diario + extracto sin conciliar · Holded declara "
-                    f"{eur(st)} (saldos metidos a mano) · " + nota_pol)
+    sc_ = fc.get("saldo_contable")
+    if sc_ is not None and abs(sc_ - fc["saldo_actual"]) > 1:
+        nota_pol = (f"tesorería (extracto) · contabilidad dice {eur(sc_)}, "
+                    f"{eur(fc['saldo_actual'] - sc_)} por apuntar · " + nota_pol)
+    else:
+        nota_pol = "tesorería (extracto) · " + nota_pol
     kpis = "".join([
         kpi("Posición bancaria hoy", eur(fc["saldo_actual"]), nota_pol),
         kpi(f"Unlevered FCF {m0['etiqueta']} · lo que llevamos",
@@ -1254,11 +1256,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         t_bancos = ""
         if pc:
             con_desc = any(x.get("descuadre") is not None for x in pc)
-            con_hol = any(x.get("holded") is not None for x in pc)
-            # la columna "Sin contab." solo aparece si hay algo que contar:
-            # es lo del extracto que el diario aun no tiene, YA SUMADO en
-            # Inicio/Hoy. Es lo que hace que las cajas se muevan cada dia.
-            con_sc = any(abs(x.get("sin_contab") or 0) > 0.5 for x in pc)
+            # contabilidad al lado, nunca dentro: la Δ contra el saldo del
+            # banco es lo que falta por apuntar o conciliar en esa cuenta
+            con_ct = any(x.get("contable") is not None for x in pc)
             f_pc, cl_pc = [], []
             for x in pc:
                 d = x.get("descuadre")
@@ -1267,22 +1267,20 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                     chip = f'<span class="rojo">{eur(d)}</span>'
                 elif d is not None:
                     chip = '<span class="chip ok">0</span>'
-                dh = x.get("dif_holded")
-                col_h = ("" if x.get("holded") is None else eur(x["holded"]))
-                col_dh = ("" if dh is None else
-                          (f'<span class="rojo">{eur(dh)}</span>'
-                           if abs(dh) > 50 else eur(dh)))
-                sc = x.get("sin_contab") or 0
-                col_sc = ('<span class="apagado">—</span>' if abs(sc) < 0.5
-                          else f'<i>{eur(sc)}</i>')
-                fila = [esc(x["cuenta"]), eur(x["inicio"]), eur(x["hoy"]),
+                dc = x.get("dif_conta")
+                col_c = ("" if x.get("contable") is None else eur(x["contable"]))
+                col_dc = ("" if dc is None else
+                          (f'<span class="rojo">{eur(dc)}</span>'
+                           if abs(dc) > 50 else '<span class="chip ok">0</span>'))
+                fte = x.get("fuente") or ""
+                marca = ("" if fte.startswith("tesorería") and "sin" not in fte
+                         else f' <span class="apagado">({esc(fte)})</span>')
+                fila = [esc(x["cuenta"]) + marca,
+                        eur(x["inicio"]), eur(x["hoy"]),
                         f'<span class="{"neg" if x["variacion"] < 0 else ""}">'
-                        f'{eur(x["variacion"])}</span>']
-                if con_sc:
-                    fila.append(col_sc)
-                fila.append(f'{x["n"]}')
-                if con_hol:
-                    fila += [col_h, col_dh]
+                        f'{eur(x["variacion"])}</span>', f'{x["n"]}']
+                if con_ct:
+                    fila += [col_c, col_dc]
                 if con_desc:
                     fila.append(chip)
                 f_pc.append(fila)
@@ -1290,23 +1288,17 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             tot = ["<b>Total</b>",
                    f'<b>{eur(sum(x["inicio"] for x in pc))}</b>',
                    f'<b>{eur(sum(x["hoy"] for x in pc))}</b>',
-                   f'<b>{eur(sum(x["variacion"] for x in pc))}</b>']
-            if con_sc:
-                tot.append(f'<b>{eur(sum(x.get("sin_contab") or 0 for x in pc))}</b>')
-            tot.append("")
-            if con_hol:
-                tot += [f'<b>{eur(sum(x["holded"] for x in pc if x.get("holded") is not None))}</b>',
-                        f'<b>{eur(sum(x["dif_holded"] for x in pc if x.get("dif_holded") is not None))}</b>']
+                   f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', ""]
+            if con_ct:
+                tot += [f'<b>{eur(sum(x["contable"] for x in pc if x.get("contable") is not None))}</b>',
+                        f'<b>{eur(sum(x["dif_conta"] for x in pc if x.get("dif_conta") is not None))}</b>']
             if con_desc:
                 tot.append(f'<b>{eur(sum(x["descuadre"] for x in pc if x.get("descuadre") is not None))}</b>')
             f_pc.append(tot)
             cl_pc.append("total")
-            cabs = ["Cuenta", "Inicio", "Hoy", "Variación"]
-            if con_sc:
-                cabs.append("Sin contab.")
-            cabs.append("Movs.")
-            if con_hol:
-                cabs += ["Holded declara", "Δ"]
+            cabs = ["Cuenta", "Inicio", "Hoy", "Variación", "Movs."]
+            if con_ct:
+                cabs += ["Contabilidad dice", "Δ"]
             if con_desc:
                 cabs.append("Descuadre")
             t_bancos = tabla(cabs, f_pc,
@@ -1347,16 +1339,16 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             t_puente += (
                 f'<div class="nota-cuadre {"mal" if abs(t_pe) > 1000 else "ok"}" '
                 f'style="margin-top:14px">'
-                f'<b>SIN CONCILIAR EN HOLDED: {n_tot} MOVIMIENTOS</b> — pero '
-                f'no todo es dinero que falte. <b>Ya apuntado en el diario</b> '
-                f'{eur(t_ap)}: existe el asiento, solo falta conciliarlo, NO '
-                f'suma en la posición (sumarlo la inflaba: la 2600 llevaba '
-                f'341.943 € así). <b>Duplicado del feed</b> {eur(t_du)}: el '
-                f'banco lo trae dos veces, tampoco suma. <b>Pendiente de '
-                f'apuntar de verdad</b> {eur(t_pe)}: esto SÍ está sumado, es '
-                f'la columna «Sin contab.».</div>'
-                + tabla(["Cuenta", "Ya apuntado (no suma)",
-                         "Duplicado feed (no suma)", "Pendiente de apuntar (suma)"],
+                f'<b>SIN CONCILIAR EN HOLDED: {n_tot} MOVIMIENTOS</b> — la '
+                f'posición no depende de esto (sale del banco), pero sí el '
+                f'trabajo de contabilidad. <b>Ya apuntado en el diario</b> '
+                f'{eur(t_ap)}: existe el asiento, solo falta darle a conciliar. '
+                f'<b>Duplicado del feed</b> {eur(t_du)}: el banco lo trae dos '
+                f'veces. <b>Pendiente de apuntar de verdad</b> {eur(t_pe)}: '
+                f'esto es lo único que le falta al libro diario, y es lo que '
+                f'explica la Δ de la tabla de arriba.</div>'
+                + tabla(["Cuenta", "Ya apuntado", "Duplicado del feed",
+                         "Pendiente de apuntar"],
                         f_cl, alineacion=["", "r", "r", "r"],
                         clases=[""] * (len(f_cl) - 1) + ["total"]))
         des = bk.get("desajuste")
@@ -1465,14 +1457,14 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     sb = meta.get("serie_fcf") or []
     su = meta.get("serie_unlevered") or []
     if sb:
-        # SU SEGUNDO CHECK, mes a mes: el levered (contable + sin conciliar
-        # del mes) contra el movimiento real del extracto bancario. Si Δ no
-        # es ~0, hay apuntes contabilizados con fecha de otro mes que la del
-        # banco, o el feed de ese mes esta incompleto. Lo sin conciliar puro
-        # ya no genera Δ: esta sumado en el levered, que es como debe ser
-        # -contabilidad + pendiente = banco-.
+        # SU SEGUNDO CHECK, mes a mes, con la posicion anclada en tesoreria:
+        # el levered (movimiento real del banco) contra lo que el LIBRO
+        # DIARIO apunto ese mes. La Δ es lo que la contabilidad todavia no
+        # ha recogido: si es grande, alguien va por detras y ya se sabe de
+        # cuanto. Antes se comparaba contra el extracto, que ahora es el
+        # propio levered y no seria un check sino una identidad.
         def _feed(x):
-            f = x.get("feed_neto")
+            f = x.get("diario_neto")
             if f is None:
                 return "", ""
             d = x["levered"] - f
@@ -1482,17 +1474,33 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         f_su = []
         for x in sb:
             fe, fd = _feed(x)
+            # LA DEUDA DEL MES, ABIERTA. Cuando el unlevered de un mes se
+            # dispara -junio, +1,0M- la explicacion esta siempre aqui: que
+            # se ha considerado servicio de deuda. Sin esto hay que creerse
+            # la cifra; con esto se discute con nombres y numeros.
+            dd = x.get("detalle_deuda") or []
+            det = ""
+            if dd:
+                det = (f'<details><summary>{len(dd)} '
+                       f'cuenta{"s" if len(dd) != 1 else ""}</summary>'
+                       + tabla(["Cuenta", "Nombre", "Importe"],
+                               [[f'<code>{esc(y["cuenta"])}</code>',
+                                 esc(y["nombre"] or "deuda"),
+                                 f'<span class="{"neg" if y["importe"] < 0 else ""}">'
+                                 f'{eur(y["importe"])}</span>'] for y in dd],
+                               alineacion=["", "", "r"])
+                       + '</details>')
             f_su.append([esc(x["etiqueta"]), eur(x["saldo_inicio"]),
                          eur(x["saldo_hoy"]),
                          f'<span class="{"neg" if x["levered"] < 0 else ""}">'
                          f'{eur(x["levered"])}</span>', fe, fd,
                          f'<span class="{"neg" if x["deuda"] < 0 else ""}">'
-                         f'{eur(x["deuda"])}</span>',
+                         f'{eur(x["deuda"])}</span>{det}',
                          f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
                          f'{eur(x["unlevered"])}</span></b>'])
         # El agregado es lo que se compara de verdad contra el bottom-up: un
         # mes suelto puede irse por un apunte, el acumulado no.
-        tot_feed = sum(x.get("feed_neto") or 0 for x in sb)
+        tot_feed = sum(x.get("diario_neto") or 0 for x in sb)
         f_su.append([
             f'<b>Acumulado {esc(sb[0]["etiqueta"])} — {esc(sb[-1]["etiqueta"])}</b>',
             f'<b>{eur(sb[0]["saldo_inicio"])}</b>',
@@ -1506,7 +1514,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             f'<b><span class="{"neg" if sum(x["unlevered"] for x in sb) < 0 else ""}">'
             f'{eur(sum(x["unlevered"] for x in sb))}</span></b>'])
         t_serie = tabla(["Mes", "Saldo inicial", "Saldo final", "Levered FCF",
-                         "Extracto (mov.)", "Δ", "Pagos de deuda",
+                         "Diario (apuntes)", "Δ sin apuntar", "Pagos de deuda",
                          "Unlevered FCF"], f_su,
                         alineacion=["", "r", "r", "r", "r", "r", "r", "r"],
                         clases=[""] * (len(f_su) - 1) + ["total"])
@@ -2142,16 +2150,14 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 
   <section>
     <h2>El check: variación de bancos = cobros + pagos</h2>
-    <p class="h2n"><b>Inicio</b> y <b>Hoy</b> son contabilidad (asiento de
-     apertura de enero + libro diario) <b>más lo que el extracto tiene sin
-     conciliar</b>, con signo: tu propia identidad, contabilidad + pendiente
-     = banco, cuenta a cuenta. Así la posición se mueve cada día aunque los
-     apuntes vayan por detrás del banco; la parte estimada se enseña en
-     <b>Sin contab.</b> Los saldos del listado de Holded se rellenan a mano
-     —los últimos, el 17/07— así que van al lado como <b>Holded declara</b>,
-     con su Δ, nunca dentro de la cuenta. La variación ES el levered. El día
-     que tengas el extracto real de fin de mes, escríbelo en
-     <code>tesoreria.saldos_apertura</code> y manda él.</p>
+    <p class="h2n"><b>Inicio</b> y <b>Hoy</b> son <b>tesorería</b>: el saldo
+     que hay hoy en el banco y ese mismo saldo andado hacia atrás con los
+     movimientos del extracto. Al banco le da igual si el apunte está hecho,
+     y siempre habrá cosas sin conciliar. La variación ES el levered.
+     Contabilidad va al lado, como contraste: la <b>Δ</b> de cada cuenta es
+     lo que le falta por apuntar o conciliar, y ahí es donde hay trabajo, no
+     en la posición. El día que tengas el extracto real de fin de mes,
+     escríbelo en <code>tesoreria.saldos_apertura</code> y manda él.</p>
     {t_puente}
   </section>
 
