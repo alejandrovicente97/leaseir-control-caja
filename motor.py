@@ -1213,8 +1213,17 @@ class MotorCaja:
             "check_pendiente": float(cu.get("pendiente_neto", 0) or 0),
             # las piezas del puente, para que sume A LA VISTA:
             #   cobros + pagos (diario) + sin conciliar + sin apuntar = levered
+            # El ajuste se DESPEJA, no se copia del cuadre: cobros y pagos
+            # salen de agrupar el diario por naturaleza, y en un mes con
+            # devoluciones un grupo de clientes puede venir en negativo y uno
+            # de proveedores en positivo. Despejando, la tabla suma siempre,
+            # que es lo unico que un puente tiene que hacer.
             "cobros_diario": float(cu.get("cobros_ejecutados", 0) or 0),
             "pagos_diario": float(cu.get("pagos_ejecutados", 0) or 0),
+            "ajuste_sin_apuntar": float(
+                bk["levered"] - (float(cu.get("cobros_ejecutados", 0) or 0)
+                                 + float(cu.get("pagos_ejecutados", 0) or 0)
+                                 + float(cu.get("pendiente_neto", 0) or 0))),
             "por_cuenta": bk.get("por_cuenta") or [],
         }
 

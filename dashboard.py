@@ -325,7 +325,7 @@ def pantalla_nacho(rn, fc, meta):
     # "no me cuadra el unlevered". Ahora estan las cuatro piezas, y la de
     # ajuste tiene nombre: lo que el banco ya movio y el diario aun no
     # tiene apuntado. levered = cobros + pagos + sin conciliar + sin apuntar.
-    ajuste = -rn["check_resto"]
+    ajuste = rn["ajuste_sin_apuntar"]
     f_p = [[f'Cobros de {esc(rn["etiqueta_mes"])} (libro diario)',
             cifra(rn["cobros_diario"])],
            [f'Pagos de {esc(rn["etiqueta_mes"])} (libro diario)',
@@ -341,8 +341,8 @@ def pantalla_nacho(rn, fc, meta):
     # Un resto pequeño contra una posición de seis cifras no es un error: es
     # contabilidad yendo por detrás del banco, que es la norma. Se dice en
     # ámbar y con su nombre. El rojo se reserva para lo que no se explica.
-    resto_gordo = abs(rn["check_resto"]) > max(2000.0, abs(rn["saldo_hoy"]) * 0.01)
-    chk = ('<span class="chip ok">cuadra</span>' if rn["check_ok"] else
+    resto_gordo = abs(ajuste) > max(2000.0, abs(rn["saldo_hoy"]) * 0.01)
+    chk = ('<span class="chip ok">cuadra</span>' if abs(ajuste) <= rn["check_tol"] else
            (f'<span class="chip crit">contabilidad va {eur(abs(ajuste))} por '
             f'detrás</span>' if resto_gordo else
             f'<span class="chip warn">contabilidad va {eur(abs(ajuste))} por '
