@@ -61,12 +61,23 @@ def descargar_publico(file_id: str = ID_SHEET_ELI,
 
     Devuelve None si no esta compartido asi, para que se intente con credencial.
     """
+    import time
     import requests
     url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
-    try:
-        r = requests.get(url, timeout=180, allow_redirects=True)
-    except requests.RequestException as e:
-        print(f"  [aviso] no se pudo bajar el Sheet publico: {e}")
+    # EL SHEET ES GRANDE Y GOOGLE SE TOMA SU TIEMPO EN GENERARLO. El 3 de
+    # agosto una exportacion tardo mas de 180 segundos, el timeout salto y el
+    # run entero murio sin publicar: un panel de caja no puede caerse porque
+    # Google vaya lento un martes. Tres intentos con esperas crecientes.
+    r = None
+    for intento in (1, 2, 3):
+        try:
+            r = requests.get(url, timeout=300, allow_redirects=True)
+            break
+        except requests.RequestException as e:
+            print(f"  [aviso] intento {intento}/3 de bajar el Sheet publico: {e}")
+            if intento < 3:
+                time.sleep(intento * 20)
+    if r is None:
         return None
 
     tipo = r.headers.get("Content-Type", "")
@@ -94,6 +105,14 @@ def descargar_sheet(file_id: str = ID_SHEET_ELI,
     ruta = descargar_publico(file_id, destino)
     if ruta:
         return ruta
+    # si ya hay una copia de una ejecucion anterior, mas vale el calendario
+    # de ayer que ningun panel: se avisa de que es viejo y se sigue
+    previo = Path(destino)
+    if previo.exists() and previo.stat().st_size > 10_000:
+        print(f"  [aviso] Google no responde: se usa la copia anterior de "
+              f"{previo} ({previo.stat().st_size/1e6:.1f} MB). Puede estar "
+              f"desactualizada.")
+        return previo
     print("  Reintentando con cuenta de servicio...")
     import requests
     from google.auth.transport.requests import Request
