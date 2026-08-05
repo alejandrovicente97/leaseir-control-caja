@@ -133,7 +133,7 @@ jobs:
           # El resultado del run se guarda FUERA del repo antes de tocar git.
           # Si el push choca con otro run (paso con el 44 programado contra el
           # 45 manual), NO se rebasa: dos dashboards generados del mismo dia
-          # siempre chcan y el rebase muere -"el rebase no ha podido
+          # siempre chocan y el rebase muere -"el rebase no ha podido
           # resolverse solo"-. Lo correcto es resetear a lo ultimo publicado y
           # reaplicar NUESTRO resultado encima: el dashboard mas reciente
           # manda, que es exactamente lo que significa un dashboard.
