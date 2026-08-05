@@ -1,14 +1,24 @@
 name: Control de caja Leaseir
 
-# Laborables, cada dos horas de 07:30 a 19:30 en Madrid (05:30-17:30 UTC en
-# verano). El boton de "forzar actualizacion" no puede lanzar el workflow por
-# si solo -haria falta un token de GitHub dentro de una pagina publica, y eso
-# es dejar la llave puesta-, asi que la alternativa honesta es que casi nunca
-# haga falta forzar: con siete pasadas al dia el panel nunca tiene mas de dos
-# horas. Cuesta unos 50 minutos de Actions al dia, dentro del plan gratuito.
+# CUANDO SE ACTUALIZA EL PANEL
+#
+# 1) TODOS LOS DIAS A LAS 9 DE LA MAÑANA, fines de semana incluidos. En
+#    realidad arranca a las 8:45: la pasada tarda unos nueve minutos, asi
+#    que a las nueve en punto el panel YA esta publicado, que es lo que se
+#    pidio. Actions programa siempre en UTC y no sabe de horario de verano,
+#    por eso hay dos crons diarios -uno para cada horario- y un job de
+#    guardia que deja pasar solo el que hoy cae a las 8:45 de Madrid.
+# 2) Ademas, laborables cada dos horas de 07:30 a 19:30 en Madrid, para que
+#    el panel nunca tenga mas de dos horas durante la jornada.
+#
+# El boton de "forzar actualizacion" del panel lanza el workflow con un
+# token que vive solo en el navegador de Alejandro; el resto del tiempo,
+# con estas pasadas, casi nunca hace falta tocarlo.
 on:
   schedule:
-    - cron: "30 5,7,9,11,13,15,17 * * 1-5"
+    - cron: "45 6 * * *"                      # 08:45 Madrid en verano (CEST)
+    - cron: "45 7 * * *"                      # 08:45 Madrid en invierno (CET)
+    - cron: "30 5,7,9,11,13,15,17 * * 1-5"    # laborables, cada dos horas
   workflow_dispatch:
     inputs:
       mes:
@@ -24,7 +34,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Cual de los dos crons diarios vale hoy. Se mira el DESFASE horario de
+  # Madrid, no la hora del reloj: Actions se retrasa a veces diez o veinte
+  # minutos cuando hay cola, y comparando horas una pasada retrasada se
+  # habria saltado sola. Con el desfase eso no puede pasar.
+  cuando:
+    runs-on: ubuntu-latest
+    outputs:
+      seguir: ${{ steps.d.outputs.seguir }}
+    steps:
+      - id: d
+        env:
+          CRON: ${{ github.event.schedule }}
+          EVENTO: ${{ github.event_name }}
+        run: |
+          OFF=$(TZ=Europe/Madrid date +%z)
+          if [ "$OFF" = "+0200" ]; then BUENO="45 6 * * *"; else BUENO="45 7 * * *"; fi
+          echo "Madrid va $OFF, el cron diario bueno hoy es '$BUENO'"
+          if [ "$EVENTO" != "schedule" ]; then
+            echo "Lanzado a mano: adelante"
+            echo "seguir=si" >> "$GITHUB_OUTPUT"
+          elif [ "$CRON" = "45 6 * * *" ] || [ "$CRON" = "45 7 * * *" ]; then
+            if [ "$CRON" = "$BUENO" ]; then
+              echo "Pasada diaria de las 9 de la mañana: adelante"
+              echo "seguir=si" >> "$GITHUB_OUTPUT"
+            else
+              echo "Este cron es el del otro horario: se salta"
+              echo "seguir=no" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Pasada de la jornada: adelante"
+            echo "seguir=si" >> "$GITHUB_OUTPUT"
+          fi
+
   forecast:
+    needs: cuando
+    if: needs.cuando.outputs.seguir == 'si'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,7 +133,7 @@ jobs:
           # El resultado del run se guarda FUERA del repo antes de tocar git.
           # Si el push choca con otro run (paso con el 44 programado contra el
           # 45 manual), NO se rebasa: dos dashboards generados del mismo dia
-          # siempre chocan y el rebase muere -"el rebase no ha podido
+          # siempre chcan y el rebase muere -"el rebase no ha podido
           # resolverse solo"-. Lo correcto es resetear a lo ultimo publicado y
           # reaplicar NUESTRO resultado encima: el dashboard mas reciente
           # manda, que es exactamente lo que significa un dashboard.
