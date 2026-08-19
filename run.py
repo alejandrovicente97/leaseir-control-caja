@@ -115,15 +115,25 @@ def main() -> None:
     ff = (cfg.get("pagos") or {}).get("fuera_del_forecast") or []
     if ff:
         pf = getattr(m, "pagos_fuera_forecast", None)
-        imp = (pf["pendiente"].sum()
-               if pf is not None and not pf.empty and "pendiente" in pf.columns else 0.0)
-        n = 0 if pf is None else len(pf)
-        cifra = f"{abs(imp):,.0f}".replace(",", " ")
+        # misma cifra que el ageing: facturas con pendiente POSITIVO. Los
+        # abonos van aparte, que si no la misma deuda sale con dos importes
+        # (841.763 en el ageing y 693.791 aqui) y nadie sabe cual creerse.
+        bruto = neto_ab = 0.0
+        n = n_ab = 0
+        if pf is not None and not pf.empty and "pendiente" in pf.columns:
+            pos = pf[pf["pendiente"] > 0.01]; ab = pf[pf["pendiente"] < -0.01]
+            bruto, n = float(pos["pendiente"].sum()), len(pos)
+            neto_ab, n_ab = float(ab["pendiente"].sum()), len(ab)
+        cifra = f"{bruto:,.0f}".replace(",", " ")
+        extra = ""
+        if n_ab:
+            extra = (f" Hay ademas {n_ab} abono{'s' if n_ab != 1 else ''} por "
+                     f"{abs(neto_ab):,.0f} EUR a favor.".replace(",", " "))
         calidad.append(
             f"Fuera del forecast de pagos por ser deuda comercial antigua: "
             f"{', '.join(ff)} ({n} factura{'s' if n != 1 else ''}, {cifra} EUR "
-            f"pendientes). Sigue en el ageing y en el pendiente de pago; no se "
-            f"proyecta como salida de caja del mes.")
+            f"pendientes).{extra} Sigue en el ageing y en el pendiente de "
+            f"pago; no se proyecta como salida de caja del mes.")
 
     v = m.cobros_por_factura()
     if not v.empty and "en_calendario" in v.columns:
