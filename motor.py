@@ -129,13 +129,49 @@ class MotorCaja:
         v["k"] = v["num"].map(norm)
         v["en_calendario"] = v["k"].isin(en_cal)
 
+        # DE DONDE SALE EL VENCIMIENTO DE CADA FACTURA, por este orden:
+        #   1. la cuota de Eli, si la ha cargado: es la que manda, porque en
+        #      un renting a 36 meses solo es exigible lo ya vencido.
+        #   2. si Eli calla, el due_date que Holded YA TRAE en la factura
+        #      (invoices y purchases lo llevan siempre en la API v2). Antes se
+        #      ignoraba y 152 facturas sin cuota se daban por exigibles HOY
+        #      aunque Holded dijera que vencen en octubre: inflaba el vencido y
+        #      adelantaba cobros que no son de este mes.
+        #   3. sin ninguna de las dos, exigible integra hoy, y se dice.
+        hoy = date.today()
+        fin_mes = self._fin_de_mes(self.mes)
+
         def teorico_hoy(r):
             acum = acum_hasta.get(r["k"], 0.0)
             if abs(acum) > 0.005:
                 return acum                    # calendario de cuotas de Eli
+            vto = r.get("vencimiento")
+            if vto is not None and not r["en_calendario"]:
+                # Holded: exigible cuando vence, no antes. Lo que vence este
+                # mes cuenta como del mes (es el corte que usa el forecast).
+                return r["total"] if vto <= fin_mes else 0.0
             return r["total"]                  # sin calendario: exigible integra
 
+        def origen_venc(r):
+            if abs(acum_hasta.get(r["k"], 0.0)) > 0.005 or (
+                    r["en_calendario"] and por_fac_mes):
+                return "eli"
+            if r.get("vencimiento") is not None:
+                return "holded"
+            return "ninguno"
+
         v["teorico_hoy"] = v.apply(teorico_hoy, axis=1)
+        v["origen_venc"] = v.apply(origen_venc, axis=1)
+        # discrepancia: Eli tiene cuota Y Holded trae vencimiento distinto del
+        # ultimo mes de cuota. No cambia el numero (manda Eli), pero se ensena.
+        ult_cuota = cal.groupby("k")["mes"].max().to_dict()
+        def discrepa(r):
+            if r["origen_venc"] != "eli" or r.get("vencimiento") is None:
+                return False
+            u = ult_cuota.get(r["k"])
+            return bool(u) and mes_de(r["vencimiento"]) not in (u, None) \
+                and mes_de(r["vencimiento"]) > u
+        v["venc_discrepa"] = v.apply(discrepa, axis=1)
         v["pendiente_cobro"] = v["teorico_hoy"] - v["liquidado"]
         v["cuota_mes"] = v["k"].map(lambda k: por_fac_mes.get((k, self.mes), 0.0))
         v["retraso"] = (v["pendiente_cobro"] - v["cuota_mes"]).clip(lower=0)
@@ -159,6 +195,14 @@ class MotorCaja:
                 continue
 
             base = v["k"].map(lambda k, m=m: por_fac_mes.get((k, m), 0.0))
+            # las facturas que Eli no tiene y Holded fecha en ese mes: entra
+            # lo que quede por cobrar de ellas justo en su mes de vencimiento
+            de_holded = v.apply(
+                lambda r, m=m: (r["total"] - r["liquidado"]) if (
+                    r["origen_venc"] == "holded" and r.get("mes_venc") == m
+                    and (r["total"] - r["liquidado"]) > 0.005) else 0.0,
+                axis=1)
+            base = base + de_holded
             if activo:
                 # OJO: en el Excel las 4 columnas de meses futuros apuntan todas
                 # a $J$1, asi que las mismas facturas de renting de junio se
@@ -218,13 +262,11 @@ class MotorCaja:
         if d.empty:
             return pd.DataFrame(), {"entra": 0.0, "fuera": 0.0}
 
-        def antiguedad(r):
-            f = r.get("vencimiento") or r.get("fecha")
-            try:
-                return (hoy - f).days
-            except Exception:
-                return 0
-        d["dias"] = d.apply(antiguedad, axis=1)
+        # la edad se mide desde la PRIMERA cuota impagada (Eli) o desde el
+        # vencimiento de Holded: la misma referencia que usa el ageing, para
+        # que "dudoso" aqui y "+90 dias" alli sean la misma factura
+        ref = self._referencia_vencimiento(d)
+        d["dias"] = ref.map(lambda f: (hoy - f).days if isinstance(f, date) else 0)
         # Lo que esta al dia no es dudoso por mucho que el cliente sea lento:
         # solo se juzga lo que ya deberia haber entrado.
         d["entra"] = (d["retraso"] <= 0.01) | (d["dias"] <= dias)
@@ -489,6 +531,134 @@ class MotorCaja:
                                 "importe": float(f["importe"])} for f in filas]
         salida["_detalle"] = detalle
         return salida
+
+    @staticmethod
+    def _fin_de_mes(mes: str) -> date:
+        """Ultimo dia del mes YYYYMM."""
+        a, m = int(mes[:4]), int(mes[4:])
+        sig = date(a + (m == 12), (m % 12) + 1, 1)
+        return date.fromordinal(sig.toordinal() - 1)
+
+    def _referencia_vencimiento(self, v: pd.DataFrame) -> pd.Series:
+        """
+        Desde cuando esta vencida cada factura de venta.
+
+        Con cuotas de Eli: el mes de la PRIMERA cuota que el cliente dejo sin
+        cubrir. Se recorre el calendario acumulando cuotas contra lo cobrado y
+        el primer mes en que lo acumulado supera lo liquidado es la fecha; si
+        va al dia, el fin del mes en curso. Es la edad real del retraso, no la
+        de la factura entera. Sin cuotas: el due_date de Holded.
+
+        Lo usan cobrabilidad() y ageing(): asi "dudoso" en un sitio y "+90
+        dias" en el otro son exactamente la misma factura.
+        """
+        cal = self.cal.copy()
+        cuotas = {}
+        if not cal.empty:
+            cal["k"] = cal["factura"].map(norm)
+            cal = cal[cal["mes"] <= self.mes].sort_values("mes")
+            cuotas = {k: list(zip(g["mes"], g["importe"]))
+                      for k, g in cal.groupby("k")}
+        fin = self._fin_de_mes(self.mes)
+
+        def ref(r):
+            if r.get("origen_venc") == "eli":
+                acum = 0.0
+                for m, imp in cuotas.get(r["k"], []):
+                    acum += float(imp)
+                    if acum > float(r["liquidado"]) + 0.005:
+                        return self._fin_de_mes(str(m))
+                return fin
+            return r.get("vencimiento")
+        return v.apply(ref, axis=1) if not v.empty else pd.Series(dtype=object)
+
+    def ageing(self) -> dict:
+        """
+        Antiguedad de lo pendiente, en las dos direcciones, por vencimiento.
+        Cubos clasicos: por vencer, 0-30, 31-60, 61-90, +90 dias. Cada cubo
+        con importe y numero de facturas; y debajo, cliente a cliente y
+        proveedor a proveedor, con el detalle factura a factura para llegar
+        hasta el documento de Holded.
+
+        En cobros la referencia es la fecha en la que la factura deberia
+        haber entrado: la cuota de Eli si existe, el due_date de Holded si no.
+        En pagos, el due_date de Holded, que es lo pactado con el proveedor.
+        Es lo que convierte "1,6 millones vencidos" en algo que se puede
+        gestionar: cuanto es reciente y con quien, cuanto es viejo y con quien.
+        """
+        hoy = date.today()
+        cubos = [("por_vencer", "Por vencer", None, 0), ("0_30", "0-30 días", 0, 30),
+                 ("31_60", "31-60 días", 31, 60), ("61_90", "61-90 días", 61, 90),
+                 ("mas_90", "+90 días", 91, None)]
+
+        def cubo_de(dias):
+            # pandas guarda el None como NaN: hay que preguntarlo con isna
+            if dias is None or pd.isna(dias):
+                return "sin_fecha"
+            if dias < 0:
+                return "por_vencer"
+            for k, _, a, b in cubos[1:]:
+                if (a is None or dias >= a) and (b is None or dias <= b):
+                    return k
+            return "mas_90"
+
+        def resumen(df, tercero, ref_fecha, importe):
+            out = {"cubos": [], "terceros": [], "total": 0.0, "n": 0}
+            if df is None or df.empty:
+                return out
+            d = df[df[importe] > 0.01].copy()
+            if d.empty:
+                return out
+            d["_ref"] = d[ref_fecha]
+            d["_dias"] = d["_ref"].map(
+                lambda f: (hoy - f).days if isinstance(f, date) else None)
+            d["_cubo"] = d["_dias"].map(cubo_de)
+            tot = float(d[importe].sum())
+            out["total"], out["n"] = tot, int(len(d))
+            for k, nom, _, _ in cubos + [("sin_fecha", "Sin fecha", None, None)]:
+                g = d[d["_cubo"] == k]
+                if g.empty and k == "sin_fecha":
+                    continue
+                out["cubos"].append({
+                    "clave": k, "nombre": nom,
+                    "importe": float(g[importe].sum()), "n": int(len(g)),
+                    "pct": (float(g[importe].sum()) / tot) if tot else 0.0})
+            for t, g in d.groupby(tercero):
+                fila = {"tercero": t, "total": float(g[importe].sum()),
+                        "n": int(len(g)),
+                        "mas_antiguo": int(g["_dias"].max()) if g["_dias"].notna().any() else None,
+                        "facturas": []}
+                for k, _, _, _ in cubos:
+                    fila[k] = float(g[g["_cubo"] == k][importe].sum())
+                fila["sin_fecha"] = float(g[g["_cubo"] == "sin_fecha"][importe].sum())
+                for _, r in g.sort_values("_dias", ascending=False).iterrows():
+                    fila["facturas"].append({
+                        "id": str(r.get("id") or ""), "num": str(r.get("num") or ""),
+                        "fecha": r.get("fecha"), "vencimiento": r.get("_ref"),
+                        "dias": (None if pd.isna(r["_dias"]) else int(r["_dias"])),
+                        "importe": float(r[importe]),
+                        "origen": str(r.get("origen_venc") or "holded")})
+                out["terceros"].append(fila)
+            out["terceros"].sort(key=lambda x: -x["total"])
+            return out
+
+        # cobros: la referencia es la fecha en que DEBERIA haber entrado
+        v = self.cobros_por_factura()
+        if v is not None and not v.empty:
+            v = v.copy()
+            v["_venc_ref"] = self._referencia_vencimiento(v)
+            cob = resumen(v, "cliente", "_venc_ref", "pendiente_cobro")
+        else:
+            cob = resumen(None, "cliente", "vencimiento", "pendiente_cobro")
+
+        c = self.compras.copy()
+        if not c.empty:
+            fuera = {norm(p) for p in (self.cfg.get("pagos") or {}).get(
+                "excluir_proveedores") or []}
+            if fuera:
+                c = c[~c["proveedor"].map(norm).isin(fuera)]
+        pag = resumen(c, "proveedor", "vencimiento", "pendiente")
+        return {"cobros": cob, "pagos": pag, "cubos": [(k, n) for k, n, _, _ in cubos]}
 
     def _sin_apertura(self, m: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1167,16 +1337,40 @@ class MotorCaja:
         holgura = cierre_mes - colchon
 
         # --- cobros: cobrado / vencido / sin vencer, y el mapeo 1-2-3 ------
+        # El COBRADO es el del ano en curso, no el de toda la extraccion: al
+        # lado de un vencido de hoy, 20 millones de cobros de cuatro anos
+        # pintaban una barra 85% verde que no decia nada.
         v = self.cobros_por_factura()
-        cob = {"cobrado": 0.0, "vencido": 0.0, "sin_vencer": 0.0}
+        cob = {"cobrado": 0.0, "vencido": 0.0, "sin_vencer": 0.0,
+               "vencido_reciente": 0.0, "vencido_dudoso": 0.0, "dias_dudoso": 90}
         cert = {}
         if v is not None and not v.empty:
-            cob["cobrado"] = float(v["liquidado"].sum())
+            ano_ = str(self.mes)[:4]
+            en_ano = v["fecha_liq"].map(lambda f: mes_de(f) is not None
+                                        and str(mes_de(f)).startswith(ano_))
+            cob["cobrado"] = float(v.loc[en_ano, "liquidado"].sum())
+            cob["cobrado_total"] = float(v["liquidado"].sum())
             cob["vencido"] = float((v["teorico_hoy"] - v["liquidado"])
                                    .clip(lower=0).sum())
             cob["sin_vencer"] = float(
                 (v["total"] - v[["teorico_hoy", "liquidado"]].max(axis=1))
                 .clip(lower=0).sum())
+            # El vencido partido en dos, que son dos conversaciones distintas:
+            # lo RECIENTE (<= dias_dudoso) es accionable y es lo que se mide
+            # contra el umbral; lo DUDOSO (> dias_dudoso) es stock y tiene su
+            # propia cifra. Con 1,6M de vencido acumulado desde 2025 medido
+            # contra 300k, el rojo estaba encendido desde el dia uno y ya no
+            # significaba nada.
+            dd, tot_c = self.cobrabilidad()
+            dias_d = int(tot_c.get("dias", 90) or 90)
+            cob["dias_dudoso"] = dias_d
+            if dd is not None and not dd.empty:
+                rec = dd[dd["dias"] <= dias_d]
+                cob["vencido_reciente"] = float(
+                    (rec["pendiente_cobro"] - rec["cuota_mes"]).clip(lower=0).sum())
+                cob["vencido_dudoso"] = float(
+                    (dd[dd["dias"] > dias_d]["pendiente_cobro"]
+                     - dd[dd["dias"] > dias_d]["cuota_mes"]).clip(lower=0).sum())
             col = f"teorico_{self.mes}"
             if col in v.columns and "certidumbre" in v.columns:
                 nom = ((self.cfg.get("certidumbre") or {}).get("cobros")

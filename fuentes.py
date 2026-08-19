@@ -246,6 +246,8 @@ def desde_holded(ruta: Path) -> dict:
                 contactos[cid] = _pri(c, "name", "tradeName", "legalName",
                                       "socialName", defecto="")
 
+    sin_venc: dict = {}
+
     def documentos(clave, signo=1):
         filas = []
         for doc in d.get(clave, []) or []:
@@ -260,14 +262,24 @@ def desde_holded(ruta: Path) -> dict:
                             "amountPending", "outstandingAmount", "dueAmount")
             pendiente = num(pend_api) * signo if pend_api is not None else total - cobrado
 
-            venc = a_fecha(_pri(doc, "dueDate", "expirationDate", "date", "issueDate"))
+            # EL VENCIMIENTO ES EL VENCIMIENTO. La primera version caia a la
+            # fecha de emision cuando no habia due_date, y una factura sin
+            # vencimiento nacia "vencida" el dia de emitirse, en silencio.
+            # Ahora: si Holded no lo trae, queda vacio y se cuenta cuantas
+            # son; el motor decide que hacer con ellas y lo dice.
+            venc = a_fecha(_pri(doc, "dueDate", "expirationDate", "due"))
             emision = a_fecha(_pri(doc, "date", "issueDate", "issuedDate",
                                    "documentDate", "createdAt"))
+            if venc is None:
+                sin_venc[clave] = sin_venc.get(clave, 0) + 1
             f_liq = a_fecha(_pri(doc, "paymentDate", "paidDate", "lastPaymentDate",
                                  "collectionDate", "settledAt"))
-            # si esta cobrada del todo y no hay fecha de cobro, vale el vencimiento
+            # si esta cobrada del todo y no hay fecha de cobro, vale el
+            # vencimiento; y si tampoco lo hay, la emision (antes el
+            # vencimiento YA era la emision cuando faltaba, asi que esto no
+            # cambia ningun numero de los ya publicados)
             if f_liq is None and abs(pendiente) < 0.01 and abs(total) > 0.01:
-                f_liq = venc
+                f_liq = venc or emision
 
             estado_api = _pri(doc, "status", "state")
             if abs(pendiente) < 0.01 and abs(total) > 0.01:
@@ -507,7 +519,11 @@ def desde_holded(ruta: Path) -> dict:
         "plan_inicio": pd.DataFrame(plan_ini, columns=COLS_PLAN),
         "diario": pd.DataFrame(diario, columns=COLS_DIARIO),
         "origen": f"API de Holded ({sello})",
-        "avisos_origen": meta.get("avisos", []),
+        "avisos_origen": list(meta.get("avisos", []) or []) + (
+            [("Facturas sin fecha de vencimiento en Holded: "
+              + ", ".join(f"{n} en {k}" for k, n in sorted(sin_venc.items()))
+              + ". Se tratan como exigibles hoy; convendria ponerles vencimiento.")]
+            if sin_venc else []),
     }
 
 

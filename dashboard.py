@@ -367,17 +367,25 @@ def pantalla_nacho(rn, fc, meta):
 
     # --- cobros: los tres estados y el mapeo 1/2/3 ----------------------
     c = rn["cobros"]
-    tot_c = (c["cobrado"] + c["vencido"] + c["sin_vencer"]) or 1
-    venc_mal = c["vencido"] > rn["max_vencido"]
+    # El vencido, en dos: RECIENTE (<= dias_dudoso) es lo accionable y lo que
+    # se mide contra el umbral; DUDOSO (> dias_dudoso) es stock con su propia
+    # cifra. Y el cobrado es el del ano, no el de toda la historia.
+    v_rec = c.get("vencido_reciente", c["vencido"])
+    v_dud = c.get("vencido_dudoso", 0.0)
+    dd = int(c.get("dias_dudoso", 90) or 90)
+    tot_c = (c["cobrado"] + v_rec + v_dud + c["sin_vencer"]) or 1
+    venc_mal = v_rec > rn["max_vencido"]
     barra = (f'<div class="bstack">'
              f'<i style="width:{c["cobrado"]/tot_c*100:.1f}%;background:{P["s3"]}"></i>'
-             f'<i style="width:{c["vencido"]/tot_c*100:.1f}%;background:{P["crit"]}"></i>'
+             f'<i style="width:{v_rec/tot_c*100:.1f}%;background:{P["serious"]}"></i>'
+             f'<i style="width:{v_dud/tot_c*100:.1f}%;background:{P["crit"]}"></i>'
              f'<i style="width:{c["sin_vencer"]/tot_c*100:.1f}%;background:{P["s4"]}"></i>'
              f'</div>'
              f'<div class="bleg">'
-             f'<span><i style="background:{P["s3"]}"></i>Cobrado {eur(c["cobrado"])}</span>'
+             f'<span><i style="background:{P["s3"]}"></i>Cobrado {esc(rn["ano"])} {eur(c["cobrado"])}</span>'
              f'<span class="{"rojo" if venc_mal else ""}">'
-             f'<i style="background:{P["crit"]}"></i>Vencido {eur(c["vencido"])}</span>'
+             f'<i style="background:{P["serious"]}"></i>Vencido reciente (≤{dd} d) {eur(v_rec)}</span>'
+             f'<span><i style="background:{P["crit"]}"></i>Dudoso (&gt;{dd} d) {eur(v_dud)}</span>'
              f'<span><i style="background:{P["s4"]}"></i>Sin vencer {eur(c["sin_vencer"])}</span>'
              f'</div>')
     cert = rn.get("certidumbre") or {}
@@ -453,6 +461,72 @@ def pantalla_nacho(rn, fc, meta):
        <span class="nn2">y el mapeo 1 / 2 / 3</span></h3>{barra}</div>
     </div>
   </div>{modales}'''
+
+
+def bloque_ageing(ag, lado, etiqueta_terc, dias_dudoso=90):
+    """
+    La antiguedad de lo pendiente: cubos arriba (importe, facturas y peso),
+    y debajo tercero a tercero con las mismas columnas y el detalle factura a
+    factura, cada una con su enlace a Holded. Es la tabla que convierte un
+    "vencido" agregado en nombres, edades e importes que se pueden gestionar.
+    """
+    if not ag or not ag.get(lado) or not ag[lado].get("terceros"):
+        return '<p class="vacio">Sin pendientes con vencimiento.</p>'
+    r = ag[lado]
+    cubos = ag.get("cubos") or []
+    claves = [k for k, _ in cubos]
+
+    def col_cubo(k, v):
+        if abs(v) < 0.5:
+            return '<span class="apagado">—</span>'
+        rojo = k in ("61_90", "mas_90")
+        return f'<span class="{"rojo" if rojo else ""}">{eur(v)}</span>'
+
+    # los cubos como fila de resumen con barra de peso
+    f_c = []
+    for c in r["cubos"]:
+        barra = (f'<div class="agb"><i style="width:{min(100, c["pct"]*100):.1f}%;'
+                 f'background:{P["crit"] if c["clave"] in ("61_90","mas_90") else (P["s4"] if c["clave"] in ("0_30","31_60") else P["s3"])}"></i></div>')
+        f_c.append([esc(c["nombre"]), eur(c["importe"]), f'{c["n"]}',
+                    f'{c["pct"]*100:.0f}%', barra])
+    f_c.append(["<b>Total pendiente</b>", f'<b>{eur(r["total"])}</b>',
+                f'<b>{r["n"]}</b>', "100%", ""])
+    t_cubos = tabla(["Antigüedad", "Importe", "Facturas", "Peso", ""], f_c,
+                    alineacion=["", "r", "r", "r", ""],
+                    clases=[""] * (len(f_c) - 1) + ["total"])
+
+    # tercero a tercero, con desplegable hasta la factura
+    filas = []
+    for t in r["terceros"]:
+        celdas = "".join(f'<td class="r">{col_cubo(k, t.get(k, 0))}</td>' for k in claves)
+        sf = t.get("sin_fecha", 0)
+        ant = t.get("mas_antiguo")
+        chip_ant = ("" if ant is None else
+                    (f'<span class="chip crit">{ant} d</span>' if ant > dias_dudoso
+                     else f'<span class="chip warn">{ant} d</span>' if ant > 30
+                     else f'<span class="chip ok">{ant} d</span>' if ant >= 0
+                     else '<span class="chip ok">al día</span>'))
+        det = tabla(["Factura", "Emitida", "Vence", "Días", "Importe", "Fuente vto."],
+                    [[(f'<a href="https://app.holded.com/{"invoices" if lado == "cobros" else "purchases"}/{esc(f["id"])}" '
+                       f'target="_blank" rel="noopener">{esc(f["num"])}</a>' if f["id"] else esc(f["num"])),
+                      esc(str(f["fecha"] or "")), esc(str(f["vencimiento"] or "—")),
+                      ("" if f["dias"] is None else (f'<span class="rojo">{f["dias"]}</span>'
+                                                     if f["dias"] > dias_dudoso else str(f["dias"]))),
+                      eur(f["importe"]),
+                      {"eli": "cuota Eli", "holded": "Holded", "ninguno": "sin fecha"}.get(f["origen"], f["origen"])]
+                     for f in t["facturas"]],
+                    alineacion=["", "", "", "r", "r", ""])
+        filas.append(
+            f'<details class="terc"><summary><span class="t-nom">{esc(t["tercero"])}</span>'
+            f'<span class="t-res">{eur(t["total"])} · {chip_ant}</span>'
+            f'<span class="t-n">{t["n"]} fra.</span></summary>'
+            f'<div class="t-body"><table><thead><tr><th>Cubo</th>'
+            + "".join(f'<th class="r">{esc(n)}</th>' for _, n in cubos)
+            + (f'<th class="r">Sin fecha</th>' if sf > 0.5 else "")
+            + f'</tr></thead><tbody><tr><td>{esc(etiqueta_terc)}</td>{celdas}'
+            + (f'<td class="r">{eur(sf)}</td>' if sf > 0.5 else "")
+            + f'</tr></tbody></table>{det}</div></details>')
+    return t_cubos + '<div class="detalles" style="margin-top:12px">' + "".join(filas) + '</div>'
 
 
 def detalle_desplegable(grupos, cabeceras, alineacion=None, vacio="Sin movimientos."):
@@ -1995,6 +2069,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
      {eur(mec["saldo_cierre"])}</b>.</p>
   </section>'''
 
+    # antiguedad de lo pendiente, en las dos direcciones
+    ag = meta.get("ageing") or {}
+    dd_ = int(((meta.get("resumen_nacho") or {}).get("cobros") or {}).get("dias_dudoso", 90) or 90)
+    t_ag_cob = bloque_ageing(ag, "cobros", "Cliente", dd_)
+    t_ag_pag = bloque_ageing(ag, "pagos", "Proveedor", dd_)
+
     # la pantalla de la reunion: primera pestana, una sola pregunta
     t_nacho = pantalla_nacho(meta.get("resumen_nacho"), fc, meta)
     if not t_nacho:
@@ -2304,6 +2384,8 @@ body.reunion #p0.panel.visible{{display:flex;flex-direction:column;
 .ncard td,.ncard th{{padding:3px 6px}}
 .nn{{font-size:11px;color:{P['muted']};margin:5px 0 0;line-height:1.4}}
 .bstack{{display:flex;height:26px;border-radius:6px;overflow:hidden;margin:6px 0 7px}}
+.agb{{width:120px;height:10px;background:#eef1f2;border-radius:5px;overflow:hidden}}
+.agb i{{display:block;height:100%}}
 .bstack i{{display:block}}
 .bleg{{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:{P['ink2']}}}
 .bleg span{{display:flex;align-items:center;gap:6px}}
@@ -2533,9 +2615,18 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
   {t_cobrab}
 
   <section>
+    <h2>Antigüedad del pendiente de cobro</h2>
+    <p class="h2n">Desde cuándo está vencido cada euro: con cuotas de Eli, desde la
+     primera cuota que el cliente dejó sin cubrir; sin cuotas, desde el
+     vencimiento que trae Holded en la factura. Cada factura enlaza a Holded.</p>
+    {t_ag_cob}
+  </section>
+
+  <section>
     <h2>Pendiente de cobro por cliente</h2>
     <p class="h2n">Exigible = cuota teórica acumulada del calendario de Eli menos lo
-     realmente cobrado. De un renting a 36 meses solo cuenta lo ya vencido.</p>
+     realmente cobrado; si Eli no tiene cuota, manda el vencimiento de Holded.
+     De un renting a 36 meses solo cuenta lo ya vencido.</p>
     {g_cob}
   </section>
 
@@ -2578,6 +2669,14 @@ code{{background:#eef1f2;padding:1px 5px;border-radius:3px;font-size:12.5px}}
 <div id="p3" class="panel">
 
   <div class="kpis">{kpis_pag}</div>
+
+  <section>
+    <h2>Antigüedad del pendiente de pago</h2>
+    <p class="h2n">Por vencimiento pactado (el de la factura en Holded). Lo que
+     está en +90 días es lo que hay que renegociar o pagar ya; lo por vencer es
+     el calendario. Cada factura enlaza a Holded.</p>
+    {t_ag_pag}
+  </section>
 
   <section>
     <h2>Pendiente de pago por proveedor</h2>

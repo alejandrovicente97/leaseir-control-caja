@@ -115,8 +115,28 @@ def main() -> None:
         if sin_cal:
             calidad.append(
                 f"{sin_cal} facturas de {m.mes_inicio} en adelante no figuran en el "
-                f"calendario de Eli; se toman como exigibles al 100%. Conviene "
+                f"calendario de Eli; se toma el vencimiento que trae Holded y, "
+                f"si tampoco lo hay, se dan por exigibles hoy. Conviene "
                 f"revisarlas con ella.")
+        # facturas SIN cuota de Eli cuyo vencimiento lo pone Holded: ya no se
+        # dan por exigibles hoy, entran en su mes. Se dice cuantas y cuanto.
+        if "origen_venc" in v.columns:
+            hv = v[(v["origen_venc"] == "holded") & (v["pendiente"] > 0.01)] \
+                if "pendiente" in v.columns else v[v["origen_venc"] == "holded"]
+            if len(hv):
+                fut = hv[hv["teorico_hoy"] < 0.01]
+                calidad.append(
+                    f"{len(hv)} facturas sin cuota en el calendario de Eli toman "
+                    f"el vencimiento de Holded; {len(fut)} de ellas "
+                    f"({fut['total'].sum() - fut['liquidado'].sum():,.0f} EUR) "
+                    f"vencen mas adelante y ya no se cuentan como exigibles hoy."
+                    .replace(",", " "))
+            disc = v[v.get("venc_discrepa", False) == True] if "venc_discrepa" in v.columns else v.iloc[0:0]
+            if len(disc):
+                calidad.append(
+                    f"{len(disc)} facturas con cuota de Eli cuyo vencimiento en "
+                    f"Holded es posterior a la ultima cuota. Manda Eli, pero "
+                    f"conviene mirar cual de los dos esta mal.")
         neg = v[v["pendiente_cobro"] < -0.01]
         if len(neg):
             calidad.append(
@@ -167,6 +187,8 @@ def main() -> None:
             "mes_en_curso": m.mes_en_curso(fc),
             # la pantalla de la reunion con Nacho: una pregunta y cinco cifras
             "resumen_nacho": m.resumen_nacho(fc),
+            # antiguedad de lo pendiente, cobros y pagos, hasta la factura
+            "ageing": m.ageing(),
             "caja_naturaleza": m.caja_por_naturaleza(),
             "serie_unlevered": m.serie_unlevered(6),
             "serie_fcf": m.serie_fcf(6),
