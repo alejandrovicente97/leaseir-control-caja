@@ -109,6 +109,22 @@ def main() -> None:
             f"({n} factura{'s' if n != 1 else ''}, {cifra} EUR pendientes). "
             f"Es saldo entre sociedades del grupo, no salida de caja: fuera "
             f"del forecast, pero contabilizado aqui.")
+    # Deuda comercial vieja apartada del forecast de pagos: se dice con su
+    # importe. Sigue en el ageing y en el pendiente; solo no cuenta como pago
+    # del mes. Ocultar 842k sin decirlo seria peor que contarlos.
+    ff = (cfg.get("pagos") or {}).get("fuera_del_forecast") or []
+    if ff:
+        pf = getattr(m, "pagos_fuera_forecast", None)
+        imp = (pf["pendiente"].sum()
+               if pf is not None and not pf.empty and "pendiente" in pf.columns else 0.0)
+        n = 0 if pf is None else len(pf)
+        cifra = f"{abs(imp):,.0f}".replace(",", " ")
+        calidad.append(
+            f"Fuera del forecast de pagos por ser deuda comercial antigua: "
+            f"{', '.join(ff)} ({n} factura{'s' if n != 1 else ''}, {cifra} EUR "
+            f"pendientes). Sigue en el ageing y en el pendiente de pago; no se "
+            f"proyecta como salida de caja del mes.")
+
     v = m.cobros_por_factura()
     if not v.empty and "en_calendario" in v.columns:
         sin_cal = int((~v["en_calendario"]).sum())

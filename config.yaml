@@ -486,8 +486,19 @@ cobros:
     ZIRANADIEZ SERVICIOS Y APARATOLOGIA SL: Venta Directa
 
 pagos:
+  # INTERCOMPANIA: fuera de todo (forecast, ageing, realizados). No es caja,
+  # es saldo entre sociedades del grupo.
   excluir_proveedores:
     - "Leaseir Medical Light, S.L."      # IC, no sale dinero de la caja
+
+  # DEUDA COMERCIAL VIEJA que no se paga por el circulante: fuera del
+  # FORECAST, pero SIGUE en el ageing y en el pendiente, que es justo donde
+  # hay que vigilarla, y sus pagos reales -si los hay- cuentan.
+  # Alejandro, 19-ago, sobre Monocrom (841.763 EUR, la mas vieja a 833 dias):
+  # "va fuera". Meterlos como pago del mes convertia el forecast en una
+  # cifra que nadie se cree; apartarlos sin decirlo es esconder 842k.
+  fuera_del_forecast:
+    - "Monocrom S.L."
 
 # ---------------------------------------------------------------------------
 # 3.ter TESORERIA: LIMITES DE LAS POLIZAS

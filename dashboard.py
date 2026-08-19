@@ -516,9 +516,12 @@ def bloque_ageing(ag, lado, etiqueta_terc, dias_dudoso=90):
                       {"eli": "cuota Eli", "holded": "Holded", "ninguno": "sin fecha"}.get(f["origen"], f["origen"])]
                      for f in t["facturas"]],
                     alineacion=["", "", "", "r", "r", ""])
+        marca_ff = ('<span class="chip warn" title="Deuda comercial antigua: no se '
+                    'proyecta como pago del mes">fuera del forecast</span> '
+                    if t.get("fuera_forecast") else "")
         filas.append(
             f'<details class="terc"><summary><span class="t-nom">{esc(t["tercero"])}</span>'
-            f'<span class="t-res">{eur(t["total"])} · {chip_ant}</span>'
+            f'<span class="t-res">{marca_ff}{eur(t["total"])} · {chip_ant}</span>'
             f'<span class="t-n">{t["n"]} fra.</span></summary>'
             f'<div class="t-body"><table><thead><tr><th>Cubo</th>'
             + "".join(f'<th class="r">{esc(n)}</th>' for _, n in cubos)
@@ -526,7 +529,13 @@ def bloque_ageing(ag, lado, etiqueta_terc, dias_dudoso=90):
             + f'</tr></thead><tbody><tr><td>{esc(etiqueta_terc)}</td>{celdas}'
             + (f'<td class="r">{eur(sf)}</td>' if sf > 0.5 else "")
             + f'</tr></tbody></table>{det}</div></details>')
-    return t_cubos + '<div class="detalles" style="margin-top:12px">' + "".join(filas) + '</div>'
+    nota_ff = ""
+    if r.get("fuera_forecast_total"):
+        nota_ff = (f'<p class="h2n" style="margin-top:8px">De este pendiente, '
+                   f'<b>{eur(r["fuera_forecast_total"])}</b> está marcado como deuda '
+                   f'comercial antigua y <b>no entra en el forecast de pagos</b>; '
+                   f'sigue aquí porque es donde hay que vigilarlo.</p>')
+    return t_cubos + nota_ff + '<div class="detalles" style="margin-top:12px">' + "".join(filas) + '</div>'
 
 
 def detalle_desplegable(grupos, cabeceras, alineacion=None, vacio="Sin movimientos."):

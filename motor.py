@@ -85,6 +85,17 @@ class MotorCaja:
             self.compras_excluidas = self.compras[marca].copy()
             self.compras = self.compras[~marca].copy()
 
+    def _fuera_del_forecast(self) -> set:
+        """
+        Proveedores cuya deuda no se paga por el circulante (Monocrom: 842k a
+        833 dias). Salen del FORECAST de pagos, pero siguen en el ageing y en
+        el pendiente, que es donde hay que vigilarlos, y sus pagos reales
+        cuentan. Distinto de excluir_proveedores (intercompania), que sale de
+        todo porque no es caja.
+        """
+        return {norm(p) for p in (self.cfg.get("pagos") or {}).get(
+            "fuera_del_forecast") or []}
+
     # =======================================================================
     #  COBROS
     # =======================================================================
@@ -333,6 +344,14 @@ class MotorCaja:
         if c.empty or "pendiente" not in c.columns:
             return pd.DataFrame()
         c = c[c["pendiente"].abs() > 0.01]
+        # deuda comercial vieja fuera del forecast: se aparta y se guarda
+        # con su importe para publicarlo, nunca se borra
+        fuera = self._fuera_del_forecast()
+        self.pagos_fuera_forecast = pd.DataFrame()
+        if fuera and not c.empty:
+            marca = c["proveedor"].map(norm).isin(fuera)
+            self.pagos_fuera_forecast = c[marca].copy()
+            c = c[~marca]
         if c.empty:
             return pd.DataFrame()
 
@@ -363,6 +382,9 @@ class MotorCaja:
         if c.empty or "pendiente" not in c.columns:
             return pd.DataFrame()
         c = c[c["pendiente"].abs() > 0.01].copy()
+        fuera = self._fuera_del_forecast()
+        if fuera and not c.empty:
+            c = c[~c["proveedor"].map(norm).isin(fuera)]
         if c.empty:
             return c
         c["vencido"] = c["mes_venc"].map(
@@ -658,6 +680,13 @@ class MotorCaja:
             if fuera:
                 c = c[~c["proveedor"].map(norm).isin(fuera)]
         pag = resumen(c, "proveedor", "vencimiento", "pendiente")
+        # los que estan fuera del forecast se ensenan IGUAL, pero marcados:
+        # el ageing es precisamente donde hay que verlos
+        ff = self._fuera_del_forecast()
+        for t in pag.get("terceros", []):
+            t["fuera_forecast"] = norm(t["tercero"]) in ff
+        pag["fuera_forecast_total"] = float(sum(
+            t["total"] for t in pag.get("terceros", []) if t.get("fuera_forecast")))
         return {"cobros": cob, "pagos": pag, "cubos": [(k, n) for k, n, _, _ in cubos]}
 
     def _sin_apertura(self, m: pd.DataFrame) -> pd.DataFrame:
