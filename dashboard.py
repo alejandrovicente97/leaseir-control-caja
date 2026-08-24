@@ -499,9 +499,20 @@ def bloque_ageing(ag, lado, etiqueta_terc, dias_dudoso=90):
                      else f'<span class="chip warn">{ant} d</span>' if ant > 30
                      else f'<span class="chip ok">{ant} d</span>' if ant >= 0
                      else '<span class="chip ok">al día</span>'))
+        # ENLACE A HOLDED SIN 404. Holded no documenta URL por factura (los
+        # /invoices/{id} de la primera version daban 404): se enlaza al
+        # listado real -sales/revenue o expenses/list, los de su propia
+        # documentacion- y el click deja el numero de factura COPIADO en el
+        # portapapeles para pegarlo en el buscador de Holded. Un paso mas,
+        # pero un paso que funciona siempre.
+        lista_url = ("https://app.holded.com/sales/revenue" if lado == "cobros"
+                     else "https://app.holded.com/expenses/list")
         det = tabla(["Factura", "Emitida", "Vence", "Días", "Importe", "Fuente vto."],
-                    [[(f'<a href="https://app.holded.com/{"invoices" if lado == "cobros" else "purchases"}/{esc(f["id"])}" '
-                       f'target="_blank" rel="noopener">{esc(f["num"])}</a>' if f["id"] else esc(f["num"])),
+                    [[(f'<a href="{lista_url}" target="_blank" rel="noopener" '
+                       f'class="hlink" data-num="{esc(f["num"])}" '
+                       f'title="Abre el listado en Holded; el nº queda copiado '
+                       f'para pegarlo en su buscador">{esc(f["num"])} ⧉</a>'
+                       if f["num"] else esc(f["num"])),
                       esc(str(f["fecha"] or "")), esc(str(f["vencimiento"] or "—")),
                       ("" if f["dias"] is None else (f'<span class="rojo">{f["dias"]}</span>'
                                                      if f["dias"] > dias_dudoso else str(f["dias"]))),
@@ -2763,6 +2774,16 @@ var MES_ACTUAL = "{m0['mes']}";
 
 // Las ventanas de la pantalla de reunion. El detalle se abre ENCIMA, nunca
 // empujando la pagina: si la pantalla creciera, dejaria de caber en una.
+// Los enlaces a Holded copian el numero de factura al portapapeles: Holded
+// no tiene URL publica por documento, asi que se abre su listado y el numero
+// va copiado para pegarlo en el buscador.
+document.addEventListener('click', function (e) {{
+  var a = e.target.closest('a.hlink');
+  if (a && navigator.clipboard) {{
+    try {{ navigator.clipboard.writeText(a.dataset.num || ''); }} catch (_) {{}}
+  }}
+}});
+
 document.querySelectorAll('.mas').forEach(function (b) {{
   b.addEventListener('click', function () {{
     var m = document.getElementById(b.dataset.m);
