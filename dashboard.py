@@ -262,18 +262,11 @@ def pantalla_nacho(rn, fc, meta):
     def cifra(v):
         return f'<span class="{"neg" if v < 0 else ""}">{eur(v)}</span>'
 
-    # --- la respuesta, sin banda ----------------------------------------
-    # Alejandro: "esto lo puedes quitar". La banda de la pregunta ocupaba
-    # una quinta parte de la pantalla para decir una palabra. El veredicto
-    # se queda -es la pregunta de la reunion- pero como una linea dentro
-    # del KPI de posicion, que es donde vive esa respuesta.
-    if not rn["llega"]:
-        v_cls, v_txt = "crit", f'hay que tirar de póliza · cierre {eur(rn["cierre_mes"])}'
-    elif rn["cierre_mes"] < col:
-        v_cls, v_txt = "warn", f'llegamos justos · cierre {eur(rn["cierre_mes"])}'
-    else:
-        v_cls, v_txt = "ok", f'llegamos sin póliza · cierre {eur(rn["cierre_mes"])}'
-    veredicto = f'<span class="chip {v_cls}">{v_txt}</span>'
+    # El veredicto en texto ("llegamos sin poliza · cierre X") se quito a
+    # peticion de Alejandro, 23-ago: "esto fuera". El cierre proyectado ya
+    # vive en el KPI de unlevered proyectado y en la cascada; el KPI de
+    # posicion solo se pone en rojo si el cierre no llega, que es la unica
+    # situacion en la que el veredicto aporta algo.
 
     # --- los cinco numeros ----------------------------------------------
     def nk(t, v, n, estado="", det=""):
@@ -282,12 +275,12 @@ def pantalla_nacho(rn, fc, meta):
                 f'<div class="nk-v">{v}</div>'
                 f'<div class="nk-n">{n}{b}</div></div>')
 
-    est_pos = "" if rn["saldo_hoy"] >= col else "malo"
+    est_pos = "" if (rn["saldo_hoy"] >= col and rn["llega"]) else "malo"
     peor = ""
     if rn["peor_saldo"] < col:
         peor = (f' · <span class="rojo">punto flojo {esc(rn["peor_mes"])} '
                 f'{eur(rn["peor_saldo"])}</span>')
-    nota_pos = (f'{veredicto}<br>+ {eur(rn["polizas"])} de póliza = '
+    nota_pos = (f'+ {eur(rn["polizas"])} de póliza = '
                 f'{eur(rn["liquidez"])} disponibles{peor}')
     kpis = "".join([
         nk("Posición de tesorería hoy", eur(rn["saldo_hoy"]), nota_pos,
