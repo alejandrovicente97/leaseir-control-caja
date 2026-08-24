@@ -184,8 +184,12 @@ def clasificar_cuenta(nombre: str, tipo_api: str = "") -> str:
     # "T.CAIXA ARTURO 5139", "T. Santander Maria Magaz" y "Santander VIA T"
     # tambien son tarjetas: abreviadas y de peaje. Sin esto se colaban en la
     # caja como cuenta corriente, con su saldo negativo incluido.
-    if (any(p in n for p in ("tarjeta", "card", "visa", "mastercard", "amex",
-                             "american express", "via t"))
+    # "tarj" pilla "Caixa Tarj.Credito-Sergio", que por llevar "credito" en
+    # el nombre acababa clasificada como poliza y sumaba como pago de deuda;
+    # "solred" es la tarjeta de combustible de Repsol (MASTER WORLD
+    # CORPORATE SOLRED), mismo caso.
+    if (any(p in n for p in ("tarjeta", "tarj", "card", "visa", "mastercard",
+                             "amex", "american express", "via t", "solred"))
             or re.match(r"^t\.?\s?[a-z]*\s?\d*$", n)
             or re.match(r"^t\.", n)):
         return "tarjeta"

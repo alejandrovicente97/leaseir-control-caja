@@ -1104,6 +1104,14 @@ class MotorCaja:
 
         por_cuenta = []
         usadas = set()
+        # las cuentas contables de POLIZAS y TARJETAS tambien tienen banco
+        # detras: si su 572x tiene apuntes en el diario no puede colarse en
+        # la posicion como "cuenta contable sin banco" (la poliza esta fuera
+        # de la posicion a proposito, no por olvido)
+        if "cta_conta" in ban.columns:
+            for _, r_ in ban.iterrows():
+                if r_.get("cta_conta"):
+                    usadas.add(str(r_["cta_conta"]))
         if teso_hoy or conta:
             for n, info in teso_hoy.items():
                 cta = info["cta"]
@@ -1244,15 +1252,28 @@ class MotorCaja:
                                 + abs(a["pendiente"])))
 
         # Pagos de deuda del mes, del libro diario: principal (17*, 52*),
-        # intereses y gastos financieros (66*, 527).
+        # intereses y gastos financieros (66*, 527). Y, CADA UNA CON SU
+        # NOMBRE, las otras dos piezas que Alejandro separa en su cascada
+        # (24-ago, con su cash management delante): las DISTRIBUCIONES
+        # (526*, el dividendo a Mesia) y los pagos a SOCIOS (551-553, el
+        # pago contingente). El dividendo iba dentro de "deuda" y los pagos
+        # a socios dentro del unlevered, y no son ninguna de las dos cosas:
+        # en su bottom-up son las filas Contingent Payment y Dividendos,
+        # entre el unlevered y el FCF.
         deuda, det_deuda, gasto_tarjetas = 0.0, [], 0.0
+        distribuciones, det_distrib = 0.0, []
+        socios, det_socios = 0.0, []
+        cfg_cu = self.cfg.get("cuadre") or {}
+        pref_dis = tuple(str(x) for x in
+                         cfg_cu.get("cuentas_distribuciones") or ["526"])
+        pref_soc = tuple(str(x) for x in
+                         cfg_cu.get("cuentas_socios") or ["551", "552", "553"])
         dia = self.d.get("diario")
         if dia is not None and not dia.empty:
             d = self._sin_apertura(dia[dia["mes"] == mes])
             caja = d[d["cuenta"].astype(str).str.match(PREF_CAJA)]
             resto = d[~d["cuenta"].astype(str).str.match(PREF_CAJA)]
-            pref = tuple(str(x) for x in
-                         (self.cfg.get("cuadre") or {}).get("cuentas_deuda")
+            pref = tuple(str(x) for x in cfg_cu.get("cuentas_deuda")
                          or ["17", "52", "527", "66"])
             contra, nomb = {}, {}
             for asiento, g in resto.groupby("asiento"):
@@ -1268,7 +1289,15 @@ class MotorCaja:
                 # siguiente". Es gasto que se liquida con un mes de retraso, no
                 # servicio de deuda, y devolverlo al levered inflaba el
                 # unlevered en 25.022 euros solo en julio.
-                es_deuda = c["cta"].map(lambda x: str(x).startswith(pref))
+                def _det(df):
+                    return [
+                        {"cuenta": k[0], "nombre": k[1], "importe": float(v)}
+                        for k, v in df.groupby(["cta", "nom"])["importe"].sum()
+                                      .sort_values().items()]
+                es_dis = c["cta"].map(lambda x: str(x).startswith(pref_dis))
+                es_soc = c["cta"].map(lambda x: str(x).startswith(pref_soc))
+                es_deuda = (c["cta"].map(lambda x: str(x).startswith(pref))
+                            & ~es_dis & ~es_soc)
                 es_tarj = c["nom"].map(
                     lambda n: clasificar_cuenta(str(n)) == "tarjeta")
                 dd = c[es_deuda & ~es_tarj]
@@ -1276,10 +1305,41 @@ class MotorCaja:
                 gasto_tarjetas = float(tj["importe"].sum()) if not tj.empty else 0.0
                 if not dd.empty:
                     deuda = float(dd["importe"].sum())
-                    det_deuda = [
-                        {"cuenta": k[0], "nombre": k[1], "importe": float(v)}
-                        for k, v in dd.groupby(["cta", "nom"])["importe"].sum()
-                                      .sort_values().items()]
+                    det_deuda = _det(dd)
+                di = c[es_dis]
+                if not di.empty:
+                    distribuciones = float(di["importe"].sum())
+                    det_distrib = _det(di)
+                so = c[es_soc]
+                if not so.empty:
+                    socios = float(so["importe"].sum())
+                    det_socios = _det(so)
+
+        # LA VARIACION DEL DISPUESTO DE LAS POLIZAS ES PAGO (O COBRO) DE
+        # DEUDA. Las polizas estan fuera de la posicion, asi que los 86.699
+        # devueltos a la cuenta de credito en agosto salieron del levered
+        # igual que cualquier pago; pero ninguna pieza los contaba como
+        # deuda y el unlevered se quedaba corto exactamente en eso.
+        # Alejandro, 24-ago: "los pagos de deuda son 86k, no 26k" - y su
+        # fila de Debt Repayment es literalmente el saldo de la poliza de
+        # un mes contra el del anterior. Aqui: la variacion del mes de las
+        # cuentas tipo poliza, segun su propio feed. Si el saldo de la
+        # poliza sube (se devuelve dispuesto) es pago de deuda, negativo;
+        # si baja (se dispone credito) es deuda que entra, positivo. El
+        # diario no la duplica: el traspaso banco->poliza es caja contra
+        # caja y no clasifica en ninguna contrapartida.
+        deuda_polizas, det_polizas = 0.0, []
+        cuentas_pol = set(ban[ban["tipo"] == "poliza"]["cuenta"])
+        if cuentas_pol:
+            pm = todo[todo["cuenta"].isin(cuentas_pol) & (todo["mes"] == mes)]
+            if not pm.empty:
+                for n2, v2 in pm.groupby("cuenta")["importe"].sum().items():
+                    if abs(float(v2)) < 0.005:
+                        continue
+                    det_polizas.append({"cuenta": str(n2),
+                                        "importe": -float(v2)})
+                det_polizas.sort(key=lambda x: x["importe"])
+                deuda_polizas = float(-pm["importe"].sum())
 
         self._bk[mes] = {
             "mes": mes, "etiqueta": nombre_mes(mes),
@@ -1297,10 +1357,22 @@ class MotorCaja:
             "diario_neto": float(sum(x["variacion"] for x in conta.values()))
                            if conta else None,
             "levered": variacion,
+            # la financiacion completa, pieza a pieza: deuda apuntada en el
+            # diario + variacion del dispuesto de polizas (feed) +
+            # distribuciones (526) + pagos a socios (551-553). El unlevered
+            # es el levered sin TODO esto, que es la cascada de Alejandro.
             "deuda": deuda,
+            "deuda_polizas": deuda_polizas,
+            "distribuciones": distribuciones,
+            "socios": socios,
+            "financiacion": deuda + deuda_polizas + distribuciones + socios,
             "gasto_tarjetas": gasto_tarjetas,
-            "unlevered": variacion - deuda,
+            "unlevered": variacion - (deuda + deuda_polizas
+                                      + distribuciones + socios),
             "detalle_deuda": det_deuda,
+            "detalle_polizas": det_polizas,
+            "detalle_distribuciones": det_distrib,
+            "detalle_socios": det_socios,
             "n_movimientos": int(len(del_mes)),
             "por_cuenta": por_cuenta,
         }
@@ -1329,15 +1401,20 @@ class MotorCaja:
         # --- unlevered: lo que llevamos y lo que se proyecta ---------------
         ej_mes = float(bk["unlevered"])
         pdte_mes = float(m0["fcf"])          # el forecast no proyecta deuda
+        # el contingente a socios pendiente del mes: sale de la caja (cuenta
+        # en el cierre proyectado) pero NO del unlevered, que es su gracia
+        cont_pdte = float(m0.get("contingente_socios", 0.0) or 0.0)
         ano = str(self.mes)[:4]
         cerrados = []
         for i in range(1, int(str(self.mes)[4:])):
             b = self.fcf_desde_banco(f"{ano}{i:02d}")
-            if b and (abs(b["levered"]) > 0.005 or abs(b["deuda"]) > 0.005):
+            if b and (abs(b["levered"]) > 0.005
+                      or abs(b.get("financiacion", b["deuda"])) > 0.005):
                 cerrados.append({"mes": b["mes"], "etiqueta": b["etiqueta"],
                                  "unlevered": float(b["unlevered"]),
                                  "levered": float(b["levered"]),
-                                 "deuda": float(b["deuda"])})
+                                 "deuda": float(b.get("financiacion",
+                                                      b["deuda"]))})
         ytd_ej = float(sum(x["unlevered"] for x in cerrados)) + ej_mes
 
         # --- los tres meses siguientes -------------------------------------
@@ -1349,7 +1426,7 @@ class MotorCaja:
                          "saldo": float(L["saldo_proyectado"])})
 
         saldo_hoy = float(fc["saldo_actual"])
-        cierre_mes = saldo_hoy + pdte_mes
+        cierre_mes = saldo_hoy + pdte_mes + cont_pdte
         pol = float(fc.get("polizas_disponible") or 0.0)
 
         # --- LA PREGUNTA ----------------------------------------------------
@@ -1428,8 +1505,20 @@ class MotorCaja:
             "unlev_ytd_ej": ytd_ej, "unlev_ytd_proy": ytd_ej + pdte_mes,
             "unlev_ytd_mas3": ytd_ej + pdte_mes + sum(p["unlevered"] for p in prox),
             "meses_cerrados": cerrados, "proximos": prox,
-            "levered_mes": float(bk["levered"]), "deuda_mes": float(bk["deuda"]),
+            "levered_mes": float(bk["levered"]),
+            # deuda_mes ES la financiacion completa (deuda apuntada +
+            # variacion de polizas + distribuciones + socios): es lo que el
+            # KPI resta del levered, y las piezas van cada una con su nombre
+            "deuda_mes": float(bk.get("financiacion", bk["deuda"])),
+            "deuda_banco": float(bk["deuda"]),
+            "deuda_polizas": float(bk.get("deuda_polizas") or 0.0),
+            "distribuciones": float(bk.get("distribuciones") or 0.0),
+            "socios": float(bk.get("socios") or 0.0),
+            "contingente_pdte": cont_pdte,
             "detalle_deuda": bk.get("detalle_deuda") or [],
+            "detalle_polizas": bk.get("detalle_polizas") or [],
+            "detalle_distribuciones": bk.get("detalle_distribuciones") or [],
+            "detalle_socios": bk.get("detalle_socios") or [],
             "cobros": cob, "certidumbre": cert, "max_vencido": max_venc,
             "check_resto": resto, "check_ok": abs(resto) <= tol,
             "check_tol": tol,
@@ -1616,7 +1705,8 @@ class MotorCaja:
         for i in range(n, 0, -1):
             m = suma_meses(self.mes, -i)
             b = self.fcf_desde_banco(m)
-            if b and (abs(b["levered"]) > 0.005 or abs(b["deuda"]) > 0.005):
+            if b and (abs(b["levered"]) > 0.005
+                      or abs(b.get("financiacion", b["deuda"])) > 0.005):
                 salida.append(b)
         return salida
 
@@ -1810,6 +1900,13 @@ class MotorCaja:
 
                 vistos = set()
                 if "cta_conta" in b.columns:
+                    # las contables de POLIZAS y TARJETAS tienen cuenta de
+                    # Holded detras: no pueden reaparecer como "caja contable
+                    # sin banco" y colarse en la posicion, que las excluye a
+                    # proposito
+                    for _, r in b[b["tipo"] != "cuenta"].iterrows():
+                        if r.get("cta_conta"):
+                            vistos.add(str(r["cta_conta"]))
                     for _, r in b[b["tipo"] == "cuenta"].iterrows():
                         num = str(r.get("cta_conta") or "")
                         cc = por_num.get(num)
@@ -1935,10 +2032,14 @@ class MotorCaja:
         # Se suma EXACTAMENTE lo mismo que suma la tabla banco a banco del
         # puente: si cada uno contase por su cuenta, el KPI y la tabla
         # dirian numeros distintos y no habria forma de saber cual creerse.
+        # todas las cuentas de Holded con contable detras, POLIZAS Y
+        # TARJETAS INCLUIDAS: su contable no puede reaparecer aqui como
+        # "caja sin banco" y colar en la posicion lo que se excluyo a
+        # proposito (la 572x de la poliza con asientos apuntados)
         ctas_con_banco = set()
         if "cta_conta" in b.columns and not b.empty:
             ctas_con_banco = {str(r.get("cta_conta") or "")
-                              for _, r in b[b["tipo"] == "cuenta"].iterrows()}
+                              for _, r in b.iterrows()}
         solo_conta = float(sum(x["hoy"] for k, x in (conta57 or {}).items()
                                if k not in ctas_con_banco))
         saldo_cta = saldo_cta + solo_conta
@@ -1989,13 +2090,32 @@ class MotorCaja:
 
             p_prov = float(prov[f"pago_{m}"].sum()) if not prov.empty else 0.0
             p_recu = float(recu[recu["mes"] == m]["proyectado"].sum()) if not recu.empty else 0.0
-            p_otros = -self.cfg["otros_pagos_fijos"]
+            p_otros = -float(self.cfg.get("otros_pagos_fijos") or 0)
+            # EL PAGO CONTINGENTE A SOCIOS, con su nombre y FUERA del
+            # unlevered. Era el "otros_pagos_fijos" de 5.650: la fila
+            # Contingent Payment del cash management de Alejandro, que desde
+            # julio son 22.650 al mes (2.825 + 1.412,5 + 1.412,5 + 8.500 +
+            # 4.250 + 4.250). Sale de la caja del mes -cuenta en el saldo
+            # proyectado- pero en su cascada va entre el unlevered y el
+            # levered, no dentro de la explotacion.
+            p_cont = -float((self.cfg.get("contingente_socios") or {})
+                            .get("mensual") or 0)
             p_sal, p_sl = sal, sl
             if i == 0:
                 p_sal = resto(sal, "salarios")
                 p_sl = resto(sl, "cuotas_sl")
                 p_recu = resto(p_recu, "recurrentes")
                 p_otros = resto(p_otros, "otros_fijos")
+                p_cont = resto(p_cont, "contingente")
+                # lo ya pagado a socios segun el diario (551-553) tambien
+                # descuenta, por si el concepto del banco no casa con ningun
+                # patron: se toma el mayor de los dos descuentos, nunca ambos
+                bk0 = self.fcf_desde_banco()
+                ya_soc = abs(float((bk0 or {}).get("socios") or 0.0))
+                if p_cont and ya_soc > 0:
+                    bruto = float((self.cfg.get("contingente_socios") or {})
+                                  .get("mensual") or 0)
+                    p_cont = -max(0.0, min(-p_cont, bruto - ya_soc))
 
             cash_in = c_cli + c_ren + c_fus + c_sf + c_aj
             cash_out = -abs(p_prov) + p_recu + p_sal + p_sl + p_otros
@@ -2013,6 +2133,9 @@ class MotorCaja:
                 "salarios": p_sal,
                 "cuotas_sl": p_sl,
                 "otros_fijos": p_otros,
+                # fuera del cash_out y del fcf: el fcf del forecast es
+                # unlevered y el contingente no es explotacion
+                "contingente_socios": p_cont,
                 "cash_out": cash_out,
                 "fcf": cash_in + cash_out,
             }
@@ -2079,7 +2202,9 @@ class MotorCaja:
 
         acum = saldo_cta
         for m in self.meses:
-            acum += out[m]["fcf"]
+            # el saldo se come el contingente aunque el fcf (unlevered) no:
+            # el banco no distingue explotacion de socios
+            acum += out[m]["fcf"] + out[m]["contingente_socios"]
             out[m]["saldo_proyectado"] = acum
             out[m]["saldo_proyectado_con_polizas"] = acum + disp_pol
 
@@ -2119,8 +2244,15 @@ class MotorCaja:
             eje["saldo_inicio"] = bk["saldo_inicio"]
             eje["saldo_hoy"] = bk["saldo_hoy"]
             eje["levered"] = bk["levered"]
-            eje["deuda"] = bk["deuda"]
+            eje["deuda"] = bk.get("financiacion", bk["deuda"])
+            eje["deuda_banco"] = bk["deuda"]
+            eje["deuda_polizas"] = bk.get("deuda_polizas", 0.0)
+            eje["distribuciones"] = bk.get("distribuciones", 0.0)
+            eje["socios"] = bk.get("socios", 0.0)
             eje["detalle_deuda"] = bk["detalle_deuda"]
+            eje["detalle_polizas"] = bk.get("detalle_polizas") or []
+            eje["detalle_distribuciones"] = bk.get("detalle_distribuciones") or []
+            eje["detalle_socios"] = bk.get("detalle_socios") or []
             eje["fcf"] = bk["unlevered"]
             eje["fuente"] = "saldo del banco"
             # el diario tiene que decir lo mismo; si no, hay que saberlo
@@ -2142,7 +2274,8 @@ class MotorCaja:
             eje["fuente"] = "facturas y extracto"
 
         eje["cierre_mes_fcf"] = eje["fcf"] + m0["fcf"]
-        eje["saldo_cierre_mes"] = saldo_cta + m0["fcf"]
+        eje["saldo_cierre_mes"] = (saldo_cta + m0["fcf"]
+                                   + m0["contingente_socios"])
 
         return {
             "meses": self.meses, "lineas": out,
@@ -2169,7 +2302,14 @@ class MotorCaja:
                         "ajustes": ((cob_cfg.get("ajustes_negativos") or [])
                                     + (cob_cfg.get("ajustes_positivos") or [])),
                         "otros_fijos": [{"concepto": "Otros pagos fijos",
-                                         "importe": -self.cfg["otros_pagos_fijos"]}],
+                                         "importe": -float(
+                                             self.cfg.get("otros_pagos_fijos")
+                                             or 0)}],
+                        "contingente": [{
+                            "concepto": "Pago contingente a socios",
+                            "importe": -float(
+                                (self.cfg.get("contingente_socios") or {})
+                                .get("mensual") or 0)}],
                         "fijos_pagados": pagado},
             "clientes": cli, "rentings": rent, "proveedores": prov, "recurrentes": recu,
             "detalle_cobros": self.cobros_por_factura(),
@@ -2189,7 +2329,8 @@ class MotorCaja:
         filas, saldo = [], fc["saldo_actual"]
         for m in fc["meses"]:
             L = fc["lineas"][m]
-            final_esperado = saldo + L["cash_in"] + L["cash_out"]
+            cont = float(L.get("contingente_socios", 0.0) or 0.0)
+            final_esperado = saldo + L["cash_in"] + L["cash_out"] + cont
             final_motor = L["saldo_proyectado"]
             dif = final_motor - final_esperado
             filas.append({
@@ -2197,6 +2338,7 @@ class MotorCaja:
                 "saldo_inicial": saldo,
                 "cash_in": L["cash_in"],
                 "cash_out": L["cash_out"],
+                "contingente_socios": cont,
                 "fcf": L["fcf"],
                 "saldo_final": final_motor,
                 "diferencia": dif,
@@ -2475,8 +2617,20 @@ class MotorCaja:
                    (self.cfg.get("cuotas_sl") or {}).get("operaciones") or []}
         ents_sl.discard("")
 
+        cfg_cu = self.cfg.get("cuadre") or {}
+        pref_dis = tuple(str(x) for x in
+                         cfg_cu.get("cuentas_distribuciones") or ["526"])
+        pref_soc = tuple(str(x) for x in
+                         cfg_cu.get("cuentas_socios") or ["551", "552", "553"])
+
         def cubo(r):
             cta, nom, imp = r["cta"], r["nom"], r["importe"]
+            # el orden importa: 526 y 551-553 antes que el prefijo 52 de
+            # deuda, o el dividendo vuelve a contarse como prestamo
+            if cta.startswith(pref_dis):
+                return "distribuciones"
+            if cta.startswith(pref_soc):
+                return "socios"
             if cta.startswith(pref_deuda):
                 # la tarjeta vive en cuentas 52 pero no es servicio de deuda
                 return ("tarjetas" if clasificar_cuenta(nom) == "tarjeta"
@@ -2534,28 +2688,51 @@ class MotorCaja:
             {"concepto": "Otros pagos (comisiones, traspasos, varios)",
              "ejecutado": ej("otros_pag"), "pendiente": 0.0},
         ]
+        # EL BLOQUE FINANCIERO, pieza a pieza como en su cascada: deuda del
+        # diario, distribuciones (dividendo), pagos a socios (el contingente,
+        # con su pendiente del mes) y la variacion del dispuesto de polizas,
+        # que no esta en el diario -viene del feed- y por eso va marcada.
+        dis_ej, soc_ej = ej("distribuciones"), ej("socios")
+        cont_pd = float(m0.get("contingente_socios", 0.0) or 0.0)
+        bk_pol = (self.fcf_desde_banco() or {})
+        pol_ej = float(bk_pol.get("deuda_polizas") or 0.0)
         fila_deuda = {"concepto": "Pagos de deuda (principal e intereses)",
                       "ejecutado": deu_ej, "pendiente": 0.0,
                       "total": deu_ej}
+        filas_fin = [
+            fila_deuda,
+            {"concepto": "Devolución (−) / disposición (+) de pólizas",
+             "ejecutado": pol_ej, "pendiente": 0.0, "total": pol_ej,
+             "nota": "del extracto de la póliza, aún sin apuntar en el diario"},
+            {"concepto": "Distribuciones (dividendos)",
+             "ejecutado": dis_ej, "pendiente": 0.0, "total": dis_ej},
+            {"concepto": "Pago contingente a socios",
+             "ejecutado": soc_ej, "pendiente": cont_pd,
+             "total": soc_ej + cont_pd},
+        ]
         for f in filas_in + filas_out:
             f["total"] = f["ejecutado"] + f["pendiente"]
 
         # Los totales de bloque son la suma de sus lineas, no otra cifra
         # calculada por otro camino: asi la tabla suma A LA VISTA. Y como los
-        # cubos son una particion del diario, unlevered + deuda es exactamente
-        # la variacion contable del mes (dia_cob + dia_pag), sin residuo.
+        # cubos son una particion del diario, unlevered + financiacion del
+        # diario es exactamente la variacion contable del mes (dia_cob +
+        # dia_pag), sin residuo. Las polizas quedan fuera del assert: no son
+        # diario, son feed.
         in_ej = float(sum(f["ejecutado"] for f in filas_in))
         out_ej = float(sum(f["ejecutado"] for f in filas_out))
-        assert abs((in_ej + out_ej + deu_ej) - (dia_cob + dia_pag)) < 0.01
+        assert abs((in_ej + out_ej + deu_ej + dis_ej + soc_ej)
+                   - (dia_cob + dia_pag)) < 0.01
         tot = {
             "in_ej": in_ej, "in_pd": m0["cash_in"],
             "out_ej": out_ej, "out_pd": m0["cash_out"],
-            # el unlevered ARRIBA y la deuda debajo, como en su Excel
+            # el unlevered ARRIBA y la financiacion debajo, como en su Excel
             "unlev_ej": in_ej + out_ej,
             "unlev_pd": m0["fcf"],       # el pendiente no lleva deuda proyectada
-            "deuda_ej": deu_ej,
-            "lev_ej": in_ej + out_ej + deu_ej,
-            "lev_pd": m0["fcf"],
+            "deuda_ej": deu_ej + dis_ej + soc_ej + pol_ej,
+            "fin_pd": cont_pd,
+            "lev_ej": in_ej + out_ej + deu_ej + dis_ej + soc_ej,
+            "lev_pd": m0["fcf"] + cont_pd,
         }
         tot["in_tot"] = tot["in_ej"] + tot["in_pd"]
         tot["out_tot"] = tot["out_ej"] + tot["out_pd"]
@@ -2579,7 +2756,8 @@ class MotorCaja:
             "tolerancia": float(cu.get("tolerancia", 1)) if cu else 1.0,
         }
         return {"etiqueta": m0["etiqueta"], "cash_in": filas_in,
-                "cash_out": filas_out, "deuda": fila_deuda, "tot": tot,
+                "cash_out": filas_out, "deuda": fila_deuda,
+                "financiacion": filas_fin, "tot": tot,
                 "concil": concil,
                 "saldo_hoy": fc["saldo_actual"],
                 "saldo_cierre": fc["saldo_actual"] + tot["lev_pd"]}

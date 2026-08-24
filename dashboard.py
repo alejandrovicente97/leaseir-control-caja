@@ -287,11 +287,14 @@ def pantalla_nacho(rn, fc, meta):
            est_pos, "m-bancos"),
         nk(f'Unlevered {esc(rn["etiqueta_mes"])} · llevamos',
            cifra(rn["unlev_mes_ej"]),
-           f'levered {eur(rn["levered_mes"])} · deuda {eur(rn["deuda_mes"])}',
+           f'levered {eur(rn["levered_mes"])} · '
+           f'financiación {eur(rn["deuda_mes"])}',
            "malo" if rn["unlev_mes_ej"] < 0 else "", "m-puente"),
         nk(f'Unlevered {esc(rn["etiqueta_mes"])} · proyectado',
            cifra(rn["unlev_mes_proy"]),
-           f'pendiente del mes {eur(rn["unlev_mes_pdte"])}',
+           f'pendiente del mes {eur(rn["unlev_mes_pdte"])}'
+           + (f' · contingente socios {eur(rn.get("contingente_pdte", 0))}'
+              if abs(rn.get("contingente_pdte", 0) or 0) > 0.005 else ""),
            "malo" if rn["unlev_mes_proy"] < 0 else ""),
         nk(f'Unlevered YTD {esc(rn["ano"])} · llevamos', cifra(rn["unlev_ytd_ej"]),
            f'{len(rn["meses_cerrados"])} meses cerrados + lo que va de mes',
@@ -319,18 +322,34 @@ def pantalla_nacho(rn, fc, meta):
     # ajuste tiene nombre: lo que el banco ya movio y el diario aun no
     # tiene apuntado. levered = cobros + pagos + sin conciliar + sin apuntar.
     ajuste = rn["ajuste_sin_apuntar"]
-    f_p = [[f'Cobros de {esc(rn["etiqueta_mes"])} (libro diario)',
-            cifra(rn["cobros_diario"])],
-           [f'Pagos de {esc(rn["etiqueta_mes"])} (libro diario)',
-            cifra(rn["pagos_diario"])],
-           ["Sin conciliar del extracto (con signo)",
-            cifra(rn["check_pendiente"])],
-           ["<i>Movimientos del banco aún sin apuntar</i>",
-            f'<i>{cifra(ajuste)}</i>'],
-           ["<b>= LEVERED</b> · variación de bancos",
-            f'<b>{cifra(rn["levered_mes"])}</b>'],
-           ["Pagos de deuda (por arriba)", cifra(rn["deuda_mes"])],
-           ["<b>= UNLEVERED</b>", f'<b>{cifra(rn["unlev_mes_ej"])}</b>']]
+    # LA FINANCIACION, PIEZA A PIEZA, como la cascada de su cash management
+    # (24-ago): deuda del banco, variacion del dispuesto de polizas,
+    # distribuciones y socios. Solo se pintan las que tienen importe, que
+    # esta pantalla es una y no crece.
+    piezas_fin = [
+        ("Pagos de deuda · banco (préstamos e intereses)",
+         float(rn.get("deuda_banco") or 0)),
+        ("Devolución (−) / disposición (+) de pólizas",
+         float(rn.get("deuda_polizas") or 0)),
+        ("Distribuciones (dividendos)",
+         float(rn.get("distribuciones") or 0)),
+        ("Pagos a socios (contingente)", float(rn.get("socios") or 0)),
+    ]
+    piezas_fin = [(t, v) for t, v in piezas_fin if abs(v) > 0.005]
+    f_p = ([[f'Cobros de {esc(rn["etiqueta_mes"])} (libro diario)',
+             cifra(rn["cobros_diario"])],
+            [f'Pagos de {esc(rn["etiqueta_mes"])} (libro diario)',
+             cifra(rn["pagos_diario"])],
+            ["Sin conciliar del extracto (con signo)",
+             cifra(rn["check_pendiente"])],
+            ["<i>Movimientos del banco aún sin apuntar</i>",
+             f'<i>{cifra(ajuste)}</i>'],
+            ["<b>= LEVERED</b> · variación de bancos",
+             f'<b>{cifra(rn["levered_mes"])}</b>']]
+           + ([[t, cifra(v)] for t, v in piezas_fin] or
+              [["Financiación del mes (deuda, pólizas, socios)",
+                cifra(rn["deuda_mes"])]])
+           + [["<b>= UNLEVERED</b>", f'<b>{cifra(rn["unlev_mes_ej"])}</b>']])
     # Un resto pequeño contra una posición de seis cifras no es un error: es
     # contabilidad yendo por detrás del banco, que es la norma. Se dice en
     # ámbar y con su nombre. El rojo se reserva para lo que no se explica.
@@ -341,7 +360,8 @@ def pantalla_nacho(rn, fc, meta):
             f'<span class="chip warn">contabilidad va {eur(abs(ajuste))} por '
             f'detrás</span>'))
     g2 = (tabla(["El puente", "Importe"], f_p, alineacion=["", "r"],
-                clases=["", "", "", "", "sub", "", "total"])
+                clases=["", "", "", "", "sub"]
+                       + [""] * (len(f_p) - 6) + ["total"])
           + f'<p class="nn">Las cuatro líneas suman el levered. {chk} · '
             f'Perímetro: <b>Leaseir Technologies</b>, sin LML, Nobis, Mesia '
             f'ni USA (tu bottom-up consolida los cinco).</p>')
@@ -408,13 +428,38 @@ def pantalla_nacho(rn, fc, meta):
             f'<b>{eur(sum(x["variacion"] for x in pc))}</b>', "", ""]],
         alineacion=["", "r", "r", "r", "r", "r"],
         clases=[""] * len(pc) + ["total"])
-    m_puente = (tabla(["Cuenta", "Nombre", "Importe"],
-                      [[f'<code>{esc(x["cuenta"])}</code>',
-                        esc(x["nombre"] or "deuda"), cifra(x["importe"])]
-                       for x in (rn.get("detalle_deuda") or [])] or
-                      [["", "<i>sin pagos de deuda este mes</i>", ""]],
-                      alineacion=["", "", "r"]))
-    m_ytd = tabla(["Mes", "Levered", "Deuda", "Unlevered"],
+    def _tabla_fin(filas, vacio):
+        return tabla(["Cuenta", "Nombre", "Importe"],
+                     [[f'<code>{esc(x["cuenta"])}</code>',
+                       esc(x.get("nombre") or ""), cifra(x["importe"])]
+                      for x in filas] or
+                     [["", f"<i>{vacio}</i>", ""]],
+                     alineacion=["", "", "r"])
+    m_puente = (
+        "<h4>Banco: préstamos, intereses y comisiones (libro diario)</h4>"
+        + _tabla_fin(rn.get("detalle_deuda") or [],
+                     "sin pagos de deuda apuntados este mes")
+        + "<h4>Pólizas: variación del dispuesto (extracto)</h4>"
+        + tabla(["Póliza", "Importe"],
+                [[esc(x["cuenta"]), cifra(x["importe"])]
+                 for x in (rn.get("detalle_polizas") or [])] or
+                [["<i>sin movimiento en las pólizas este mes</i>", ""]],
+                alineacion=["", "r"])
+        + '<p class="nn">Negativo = se devuelve dispuesto (pago de deuda); '
+          'positivo = se dispone crédito. Sale del extracto de la póliza, '
+          'no del diario: es la fila de <i>Debt Repayment</i> de tu '
+          'cash management.</p>'
+        + "<h4>Distribuciones (dividendos)</h4>"
+        + _tabla_fin(rn.get("detalle_distribuciones") or [],
+                     "sin distribuciones este mes")
+        + "<h4>Pagos a socios (contingente)</h4>"
+        + _tabla_fin(rn.get("detalle_socios") or [],
+                     "sin pagos a socios apuntados este mes")
+        + (f'<p class="nn">Del contingente mensual quedan '
+           f'{eur(abs(rn.get("contingente_pdte", 0)))} previstos y no '
+           f'pagados: restan al cierre proyectado, no al unlevered.</p>'
+           if abs(rn.get("contingente_pdte", 0) or 0) > 0.005 else ""))
+    m_ytd = tabla(["Mes", "Levered", "Financiación", "Unlevered"],
                   [[esc(x["etiqueta"]), cifra(x["levered"]), cifra(x["deuda"]),
                     f'<b>{cifra(x["unlevered"])}</b>']
                    for x in rn["meses_cerrados"]]
@@ -424,7 +469,9 @@ def pantalla_nacho(rn, fc, meta):
                      ["<b>YTD</b>", "", "",
                       f'<b>{cifra(rn["unlev_ytd_ej"])}</b>']],
                   alineacion=["", "r", "r", "r"],
-                  clases=[""] * (len(rn["meses_cerrados"]) + 1) + ["total"])
+                  clases=[""] * (len(rn["meses_cerrados"]) + 1) + ["total"]) \
+        + ('<p class="nn">Financiación = deuda del banco + variación del '
+           'dispuesto de pólizas + distribuciones + pagos a socios.</p>')
     m_prox = tabla(["Mes", "Unlevered proyectado", "Saldo a cierre"],
                    [[esc(rn["etiqueta_mes"]) + " (en curso)",
                      cifra(rn["unlev_mes_proy"]), eur(rn["cierre_mes"])]]
@@ -432,14 +479,18 @@ def pantalla_nacho(rn, fc, meta):
                        (f'<span class="rojo">{eur(p["saldo"])}</span>'
                         if p["saldo"] < col else eur(p["saldo"]))]
                       for p in rn["proximos"]],
-                   alineacion=["", "r", "r"])
+                   alineacion=["", "r", "r"]) \
+        + (f'<p class="nn">El saldo a cierre descuenta además '
+           f'{eur(abs(rn.get("contingente_pdte", 0)))} de pago contingente '
+           f'a socios, que queda fuera del unlevered.</p>'
+           if abs(rn.get("contingente_pdte", 0) or 0) > 0.005 else "")
     modales = "".join(
         f'<div class="modal" id="{i}"><div class="mbox">'
         f'<button class="mx" data-x="{i}">×</button>'
         f'<h3>{esc(t)}</h3>{cuerpo}</div></div>'
         for i, t, cuerpo in [
             ("m-bancos", "La posición, banco a banco", m_bancos),
-            ("m-puente", "Los pagos de deuda del mes", m_puente),
+            ("m-puente", "La financiación del mes, pieza a pieza", m_puente),
             ("m-ytd", "El unlevered mes a mes", m_ytd),
             ("m-prox", "El mes en curso y los tres siguientes", m_prox)])
 
@@ -762,7 +813,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             eur(eje.get("fcf", 0)),
             # los tres numeros tienen que sumar al titular a la vista, o el
             # lector deja de fiarse de todo lo demas
-            (f"Levered {eur(eje.get('levered', 0))} más pagos de deuda "
+            (f"Levered {eur(eje.get('levered', 0))} más financiación "
              f"{eur(-eje.get('deuda', 0))}"
              if eje.get("fuente") == "saldo del banco" else
              f"Caja {eur(eje.get('variacion_caja', 0))} menos financiación "
@@ -805,6 +856,10 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         ("Otros pagos fijos", "otros_fijos", ""),
         ("CASH OUT", "cash_out", "b"),
         ("UNLEVERED FREE CASH FLOW", "fcf", "b tot"),
+        # el contingente a socios sale de la caja pero NO del unlevered:
+        # va entre el FCF y el saldo, como en su cascada
+        ("Pago contingente a socios (fuera del unlevered)",
+         "contingente_socios", ""),
         ("Saldo proyectado (sin pólizas)", "saldo_proyectado", "b"),
         ("Saldo proyectado (con pólizas)", "saldo_proyectado_con_polizas", ""),
     ]:
@@ -1224,13 +1279,15 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     NOM_FIJO = {"salarios": "Salarios y Seguridad Social",
                 "cuotas_sl": "Cuotas S&amp;L y renting bancario",
                 "recurrentes": "Gastos recurrentes",
-                "otros_fijos": "Otros pagos fijos"}
+                "otros_fijos": "Otros pagos fijos",
+                "contingente": "Pago contingente a socios (fuera del unlevered)"}
     f_fij, det_fij = [], fij.get("_detalle") or {}
     for k, nom in NOM_FIJO.items():
         hecho = float(fij.get(k, 0) or 0)
         queda = abs(float(m0.get({"salarios": "salarios", "cuotas_sl": "cuotas_sl",
                                   "recurrentes": "recurrentes_proyectados",
-                                  "otros_fijos": "otros_fijos"}[k], 0)))
+                                  "otros_fijos": "otros_fijos",
+                                  "contingente": "contingente_socios"}[k], 0)))
         if hecho or queda:
             f_fij.append([nom, eur(hecho + queda), eur(-hecho), eur(-queda)])
     t_fijos = (tabla(["Partida", "Previsto del mes", "Ya pagado", "Queda por pagar"],
@@ -1392,7 +1449,7 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
 
     det = fc.get("detalle") or {}
     pag_fij = (det.get("fijos_pagados") or {})
-    for clave in ("salarios", "cuotas_sl", "otros_fijos"):
+    for clave in ("salarios", "cuotas_sl", "otros_fijos", "contingente"):
         d0 = det.get(clave) or []
         if not d0:
             continue
@@ -1401,7 +1458,9 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
         if hecho:
             filas.append((f"Ya pagado en {m0['etiqueta']}",
                           [hecho] + [0.0] * (len(meses) - 1)))
-        detalles[clave] = _desglose("", filas)
+        # la fila del cuadro del contingente se llama por su clave de columna
+        detalles["contingente_socios" if clave == "contingente"
+                 else clave] = _desglose("", filas)
 
     # El cuadro se monta a mano en vez de con tabla() porque cada linea que
     # tiene desglose lleva colgada una fila oculta con su detalle. Asi los
@@ -1515,28 +1574,49 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
                     f'<span class="rojo">{eur(resto_pu)}</span>'])
         f_pu.append(["<b>LEVERED FCF</b> = variación del saldo bancario",
                      f'<b>{eur(bk.get("levered", 0))}</b>'])
-        for x in eje.get("detalle_deuda") or []:
+        n_cab = len(f_pu) - 1  # todo lo anterior al LEVERED
+        # LA FINANCIACION, PIEZA A PIEZA, como la cascada de su cash
+        # management: banco, polizas, distribuciones y socios. Cada pieza
+        # con su detalle indentado, y la suma antes del unlevered.
+        def _linea(x, defecto):
             f_pu.append([f"&nbsp;&nbsp;<code>{esc(x['cuenta'])}</code> "
-                         f"{esc(x['nombre'] or 'deuda')}",
+                         f"{esc(x.get('nombre') or defecto)}",
                          f'<span class="{"neg" if x["importe"] < 0 else ""}">'
                          f'{eur(x["importe"])}</span>'])
+
+        def _pieza(titulo, importe):
+            f_pu.append([titulo,
+                         f'<span class="{"neg" if importe < 0 else ""}">'
+                         f'{eur(importe)}</span>'])
+        for x in eje.get("detalle_deuda") or []:
+            _linea(x, "deuda")
         gt = bk.get("gasto_tarjetas", 0)
         if abs(gt) > 0.5:
             f_pu.append([
                 "<i>Tarjetas, que no son deuda: gasto que vuelca al mes "
                 "siguiente. Se quedan dentro del unlevered</i>",
                 f'<i>{eur(gt)}</i>'])
+        _pieza("Pagos de deuda · banco (principal, intereses y comisiones)",
+               bk.get("deuda", 0))
+        for x in bk.get("detalle_polizas") or []:
+            _linea(x, "póliza")
+        _pieza("Devolución (−) / disposición (+) de pólizas, del extracto",
+               bk.get("deuda_polizas", 0))
+        for x in bk.get("detalle_distribuciones") or []:
+            _linea(x, "distribución")
+        _pieza("Distribuciones (dividendos)", bk.get("distribuciones", 0))
+        for x in bk.get("detalle_socios") or []:
+            _linea(x, "socios")
+        _pieza("Pagos a socios (contingente)", bk.get("socios", 0))
         f_pu += [
-            ["Pagos de deuda del mes (principal, intereses y comisiones)",
-             f'<span class="{"neg" if bk.get("deuda", 0) < 0 else ""}">'
-             f'{eur(bk.get("deuda", 0))}</span>'],
-            ["<b>UNLEVERED FCF</b> = levered − pagos de deuda",
+            ["Financiación del mes, las cuatro piezas",
+             f'<span class="{"neg" if bk.get("financiacion", 0) < 0 else ""}">'
+             f'{eur(bk.get("financiacion", 0))}</span>'],
+            ["<b>UNLEVERED FCF</b> = levered − financiación",
              f'<b>{eur(bk.get("unlevered", 0))}</b>'],
         ]
-        n_det = len(eje.get("detalle_deuda") or []) + (
-            1 if abs(bk.get("gasto_tarjetas", 0)) > 0.5 else 0)
-        n_cab = len(f_pu) - 3 - n_det  # todo lo anterior al LEVERED
-        cl_pu = [""] * n_cab + ["sub"] + [""] * n_det + ["sub", "total"]
+        n_med = len(f_pu) - n_cab - 3  # entre LEVERED y la fila de suma
+        cl_pu = [""] * n_cab + ["sub"] + [""] * n_med + ["sub", "total"]
         gm = bk.get("gasto_tarjeta_mes", 0)
         nota_tarj = ("" if abs(gm) < 0.5 else
                      f'<p class="h2n">Aparte, y sin tocar el levered: '
@@ -1773,24 +1853,34 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             # dispara -junio, +1,0M- la explicacion esta siempre aqui: que
             # se ha considerado servicio de deuda. Sin esto hay que creerse
             # la cifra; con esto se discute con nombres y numeros.
-            dd = x.get("detalle_deuda") or []
+            dd = ([{**y, "nombre": y.get("nombre") or "deuda"}
+                   for y in x.get("detalle_deuda") or []]
+                  + [{"cuenta": y["cuenta"],
+                      "nombre": "póliza: variación del dispuesto",
+                      "importe": y["importe"]}
+                     for y in x.get("detalle_polizas") or []]
+                  + [{**y, "nombre": y.get("nombre") or "distribución"}
+                     for y in x.get("detalle_distribuciones") or []]
+                  + [{**y, "nombre": y.get("nombre") or "socios"}
+                     for y in x.get("detalle_socios") or []])
             det = ""
             if dd:
                 det = (f'<details><summary>{len(dd)} '
                        f'cuenta{"s" if len(dd) != 1 else ""}</summary>'
                        + tabla(["Cuenta", "Nombre", "Importe"],
                                [[f'<code>{esc(y["cuenta"])}</code>',
-                                 esc(y["nombre"] or "deuda"),
+                                 esc(y["nombre"]),
                                  f'<span class="{"neg" if y["importe"] < 0 else ""}">'
                                  f'{eur(y["importe"])}</span>'] for y in dd],
                                alineacion=["", "", "r"])
                        + '</details>')
+            fin_x = float(x.get("financiacion", x["deuda"]))
             f_su.append([esc(x["etiqueta"]), eur(x["saldo_inicio"]),
                          eur(x["saldo_hoy"]),
                          f'<span class="{"neg" if x["levered"] < 0 else ""}">'
                          f'{eur(x["levered"])}</span>', fe, fd,
-                         f'<span class="{"neg" if x["deuda"] < 0 else ""}">'
-                         f'{eur(x["deuda"])}</span>{det}',
+                         f'<span class="{"neg" if fin_x < 0 else ""}">'
+                         f'{eur(fin_x)}</span>{det}',
                          f'<b><span class="{"neg" if x["unlevered"] < 0 else ""}">'
                          f'{eur(x["unlevered"])}</span></b>'])
         # El agregado es lo que se compara de verdad contra el bottom-up: un
@@ -1804,12 +1894,12 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
             f'{eur(sum(x["levered"] for x in sb))}</span></b>',
             f'<b>{eur(tot_feed)}</b>',
             f'<b>{eur(sum(x["levered"] for x in sb) - tot_feed)}</b>',
-            f'<b><span class="{"neg" if sum(x["deuda"] for x in sb) < 0 else ""}">'
-            f'{eur(sum(x["deuda"] for x in sb))}</span></b>',
+            f'<b><span class="{"neg" if sum(float(x.get("financiacion", x["deuda"])) for x in sb) < 0 else ""}">'
+            f'{eur(sum(float(x.get("financiacion", x["deuda"])) for x in sb))}</span></b>',
             f'<b><span class="{"neg" if sum(x["unlevered"] for x in sb) < 0 else ""}">'
             f'{eur(sum(x["unlevered"] for x in sb))}</span></b>'])
         t_serie = tabla(["Mes", "Saldo inicial", "Saldo final", "Levered FCF",
-                         "Diario (apuntes)", "Δ sin apuntar", "Pagos de deuda",
+                         "Diario (apuntes)", "Δ sin apuntar", "Financiación",
                          "Unlevered FCF"], f_su,
                         alineacion=["", "r", "r", "r", "r", "r", "r", "r"],
                         clases=[""] * (len(f_su) - 1) + ["total"])
@@ -2040,11 +2130,15 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
               f'<td class="r"><b>{eur(t["unlev_ej"])}</b></td>'
               f'<td class="r"><b>{eur(t["unlev_pd"])}</b></td>'
               f'<td class="r"><b>{eur(t["unlev_tot"])}</b></td></tr>'
-            + f'<tr><td style="padding-left:22px">{esc(fd["concepto"])} '
-              f'<i>(pendiente del mes no proyectado)</i></td>'
-              f'<td class="r">{_n(fd["ejecutado"])}</td>'
-              f'<td class="r"><span class="apagado">—</span></td>'
-              f'<td class="r">{_n(fd["total"])}</td></tr>'
+            + "".join(
+                f'<tr><td style="padding-left:22px">{esc(fx["concepto"])}'
+                + (f' <i>({esc(fx["nota"])})</i>' if fx.get("nota") else "")
+                + f'</td><td class="r">{_n(fx["ejecutado"])}</td>'
+                f'<td class="r">'
+                + (f'{_n(fx["pendiente"])}' if abs(fx.get("pendiente", 0)) > 0.005
+                   else '<span class="apagado">—</span>')
+                + f'</td><td class="r">{_n(fx["total"])}</td></tr>'
+                for fx in (mec.get("financiacion") or [fd]))
             + f'<tr class="total"><td><b>LEVERED FCF</b> = variación de caja</td>'
               f'<td class="r"><b>{eur(t["lev_ej"])}</b></td>'
               f'<td class="r"><b>{eur(t["lev_pd"])}</b></td>'
@@ -2056,9 +2150,10 @@ def construir(fc: dict, cuadre: dict, alertas: list, meta: dict) -> str:
     <h2>{esc(mec["etiqueta"])} — ejecutado, pendiente y proyectado</h2>
     <p class="h2n">Como tu hoja «Forecast Caja - Mes en Curso»: lo ya ejecutado
      (libro diario, cada euro en una sola línea por contrapartida), lo
-     pendiente según el forecast, y la suma. El UNLEVERED arriba, la deuda
-     debajo, y el LEVERED tiene que cuadrar con la variación de las cuentas
-     bancarias. {chip_cn}</p>
+     pendiente según el forecast, y la suma. El UNLEVERED arriba, la
+     financiación debajo —deuda del banco, pólizas, distribuciones y el
+     contingente a socios—, y el LEVERED tiene que cuadrar con la variación
+     de las cuentas bancarias. {chip_cn}</p>
     <table>
       <thead><tr><th>Concepto</th><th class="r">Ejecutado</th>
       <th class="r">Pendiente</th><th class="r">Mes proyectado</th></tr></thead>

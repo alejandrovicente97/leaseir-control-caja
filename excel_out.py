@@ -287,17 +287,30 @@ def _hoja_bancos(wb, bk, mec):
     _n(ws, f, 2, f"=SUM(B{fila_contable}:B{f-1})")
     _sub(ws, f, 2)
     f += 2
-    _cab(ws, f, ["Pagos de deuda del mes", "Importe"]); f += 1
+    _cab(ws, f, ["Financiación del mes (deuda, pólizas, distribuciones, "
+                 "socios)", "Importe"]); f += 1
     ini_deu = f
     for x in (bk or {}).get("detalle_deuda") or []:
         ws.cell(f, 1, f"{x['cuenta']} {x['nombre'] or 'deuda'}")
         _n(ws, f, 2, round(float(x["importe"]), 2))
         f += 1
-    ws.cell(f, 1, "TOTAL deuda")
+    for x in (bk or {}).get("detalle_polizas") or []:
+        ws.cell(f, 1, f"{x['cuenta']} (póliza: variación del dispuesto)")
+        _n(ws, f, 2, round(float(x["importe"]), 2))
+        f += 1
+    for x in (bk or {}).get("detalle_distribuciones") or []:
+        ws.cell(f, 1, f"{x['cuenta']} {x['nombre'] or 'distribución'}")
+        _n(ws, f, 2, round(float(x["importe"]), 2))
+        f += 1
+    for x in (bk or {}).get("detalle_socios") or []:
+        ws.cell(f, 1, f"{x['cuenta']} {x['nombre'] or 'socios'}")
+        _n(ws, f, 2, round(float(x["importe"]), 2))
+        f += 1
+    ws.cell(f, 1, "TOTAL financiación")
     _n(ws, f, 2, f"=SUM(B{ini_deu}:B{f-1})" if f > ini_deu else 0)
     _sub(ws, f, 2)
     _anchos(ws, [52, 18, 16, 14, 13, 8])
-    return f  # fila del total de deuda
+    return f  # fila del total de financiación
 
 
 def _hoja_forecast(wb, fc):
@@ -317,6 +330,8 @@ def _hoja_forecast(wb, fc):
               ("Otros fijos", "otros_fijos"),
               ("CASH OUT", "cash_out"),
               ("FCF", "fcf"),
+              ("Contingente a socios (fuera del unlevered)",
+               "contingente_socios"),
               ("Saldo proyectado", "saldo_proyectado")]
     f = 2
     for nombre, k in CLAVES:
@@ -657,12 +672,17 @@ def generar(ruta, fc, cuadre, meta) -> None:
     ws.cell(109, 4, "Unlevered FCF")
     cols(109, *(f"=+{c}4+{c}58" for c in "FGHIJ"))
     _sub(ws, 109, 10)
-    dd = (bk or {}).get("detalle_deuda") or []
+    dd = ((bk or {}).get("detalle_deuda") or []) + \
+        ((bk or {}).get("detalle_polizas") or [])
     pos_d = round(sum(x["importe"] for x in dd if x["importe"] > 0), 2)
     neg_d = round(sum(x["importe"] for x in dd if x["importe"] < 0), 2)
-    fijo(111, 4, "(+) Préstamos (disposiciones)", pos_d, pos_d)
-    fijo(112, 4, "(-) Dividendos", 0, 0)
-    fijo(113, 4, "(-) Préstamos (principal e intereses)", neg_d, neg_d)
+    soc_d = round(float((bk or {}).get("socios") or 0.0), 2)
+    dis_d = round(float((bk or {}).get("distribuciones") or 0.0), 2)
+    fijo(110, 4, "(-) Pago contingente a socios", soc_d, soc_d)
+    fijo(111, 4, "(+) Préstamos y pólizas (disposiciones)", pos_d, pos_d)
+    fijo(112, 4, "(-) Dividendos", dis_d, dis_d)
+    fijo(113, 4, "(-) Préstamos y pólizas (principal e intereses)",
+         neg_d, neg_d)
     ws.cell(115, 4, "Levered FCF")
     cols(115, *(f"=+SUM({c}109:{c}113)" for c in "FGHIJ"))
     _sub(ws, 115, 10)
