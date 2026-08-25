@@ -67,6 +67,9 @@ def eur(x, dec=0) -> str:
     if abs(x) < 0.5 / (10 ** dec):
         x = 0.0
     s = f"{x:,.{dec}f}".replace(",", " ")
+    if dec > 0:
+        # coma decimal, que es como se lee aqui: 1 412,50 y no 1 412.50
+        s = s.replace(".", ",")
     return s + " €"
 
 
