@@ -963,6 +963,23 @@ class MotorCaja:
                .reset_index())
         return g.reindex(g["importe"].abs().sort_values(ascending=False).index)
 
+    def _contingente_detalle(self) -> list[dict]:
+        """Los pagos del contingente a socios, uno a uno, desde config.
+        Cada linea con su importe: la cifra del mes es la SUMA de esto, no
+        un numero suelto que haya que creerse."""
+        cc = self.cfg.get("contingente_socios") or {}
+        det = cc.get("detalle") or []
+        if det:
+            return [{"concepto": str(x.get("concepto") or "Pago a socios"),
+                     "importe": -abs(float(x.get("importe") or 0))}
+                    for x in det if float(x.get("importe") or 0)]
+        m = float(cc.get("mensual") or 0)
+        return ([{"concepto": "Pago contingente a socios", "importe": -m}]
+                if m else [])
+
+    def _contingente_mensual(self) -> float:
+        return float(-sum(x["importe"] for x in self._contingente_detalle()))
+
     def fcf_desde_banco(self, mes: str | None = None) -> dict | None:
         """
         El puente que pide Alejandro, y es el que hay que dar:
@@ -1329,15 +1346,39 @@ class MotorCaja:
         # diario no la duplica: el traspaso banco->poliza es caja contra
         # caja y no clasifica en ninguna contrapartida.
         deuda_polizas, det_polizas = 0.0, []
-        cuentas_pol = set(ban[ban["tipo"] == "poliza"]["cuenta"])
+        b_pol = ban[ban["tipo"] == "poliza"]
+        cuentas_pol = set(b_pol["cuenta"])
         if cuentas_pol:
             pm = todo[todo["cuenta"].isin(cuentas_pol) & (todo["mes"] == mes)]
             if not pm.empty:
-                for n2, v2 in pm.groupby("cuenta")["importe"].sum().items():
-                    if abs(float(v2)) < 0.005:
+                # el detalle AUDITABLE: cada movimiento del feed de la
+                # poliza con su fecha y su concepto, y el dispuesto al
+                # empezar el mes y hoy (limite de config menos saldo).
+                # Alejandro, 24-ago: "pon las cifras que tocan" - la cifra
+                # que toca se ensena con el camino entero, no se cree.
+                lims = (self.cfg.get("tesoreria") or {}).get("polizas") or []
+                saldos_p = dict(zip(b_pol["cuenta"], b_pol["saldo"]))
+                for n2, g2 in pm.groupby("cuenta"):
+                    v2 = float(g2["importe"].sum())
+                    if abs(v2) < 0.005:
                         continue
-                    det_polizas.append({"cuenta": str(n2),
-                                        "importe": -float(v2)})
+                    fila = {"cuenta": str(n2), "importe": -v2}
+                    if mes == self.mes:
+                        s_hoy = float(saldos_p.get(n2, 0.0) or 0.0)
+                        lim = next((float(x.get("limite") or 0) for x in lims
+                                    if norm(str(x.get("cuenta", ""))).lower()
+                                    in norm(str(n2)).lower()), 0.0)
+                        d_hoy = (lim - s_hoy if (s_hoy > 0 and lim > 0)
+                                 else (-s_hoy if s_hoy < 0 else None))
+                        if d_hoy is not None:
+                            fila["dispuesto_hoy"] = d_hoy
+                            fila["dispuesto_inicio"] = d_hoy + v2
+                        fila["movs"] = [
+                            {"fecha": str(r2.get("fecha", ""))[:10],
+                             "concepto": str(r2.get("concepto", ""))[:90],
+                             "importe": float(r2["importe"])}
+                            for _, r2 in g2.sort_values("fecha").iterrows()]
+                    det_polizas.append(fila)
                 det_polizas.sort(key=lambda x: x["importe"])
                 deuda_polizas = float(-pm["importe"].sum())
 
@@ -2094,12 +2135,12 @@ class MotorCaja:
             # EL PAGO CONTINGENTE A SOCIOS, con su nombre y FUERA del
             # unlevered. Era el "otros_pagos_fijos" de 5.650: la fila
             # Contingent Payment del cash management de Alejandro, que desde
-            # julio son 22.650 al mes (2.825 + 1.412,5 + 1.412,5 + 8.500 +
-            # 4.250 + 4.250). Sale de la caja del mes -cuenta en el saldo
-            # proyectado- pero en su cascada va entre el unlevered y el
-            # levered, no dentro de la explotacion.
-            p_cont = -float((self.cfg.get("contingente_socios") or {})
-                            .get("mensual") or 0)
+            # julio son los seis pagos del detalle de config (2.825 +
+            # 1.412,5 + 1.412,5 + 8.500 + 4.250 + 4.250 = 22.650). Sale de
+            # la caja del mes -cuenta en el saldo proyectado- pero en su
+            # cascada va entre el unlevered y el levered, no dentro de la
+            # explotacion.
+            p_cont = -self._contingente_mensual()
             p_sal, p_sl = sal, sl
             if i == 0:
                 p_sal = resto(sal, "salarios")
@@ -2113,8 +2154,7 @@ class MotorCaja:
                 bk0 = self.fcf_desde_banco()
                 ya_soc = abs(float((bk0 or {}).get("socios") or 0.0))
                 if p_cont and ya_soc > 0:
-                    bruto = float((self.cfg.get("contingente_socios") or {})
-                                  .get("mensual") or 0)
+                    bruto = self._contingente_mensual()
                     p_cont = -max(0.0, min(-p_cont, bruto - ya_soc))
 
             cash_in = c_cli + c_ren + c_fus + c_sf + c_aj
@@ -2305,11 +2345,7 @@ class MotorCaja:
                                          "importe": -float(
                                              self.cfg.get("otros_pagos_fijos")
                                              or 0)}],
-                        "contingente": [{
-                            "concepto": "Pago contingente a socios",
-                            "importe": -float(
-                                (self.cfg.get("contingente_socios") or {})
-                                .get("mensual") or 0)}],
+                        "contingente": self._contingente_detalle(),
                         "fijos_pagados": pagado},
             "clientes": cli, "rentings": rent, "proveedores": prov, "recurrentes": recu,
             "detalle_cobros": self.cobros_por_factura(),

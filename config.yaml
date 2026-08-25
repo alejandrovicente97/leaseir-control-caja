@@ -49,12 +49,20 @@ otros_pagos_fijos: 0
 # caja del mes (cuenta en el saldo proyectado) pero queda FUERA del
 # unlevered: en el puente es su propia linea, entre el unlevered y el
 # levered, igual que en la fila 122 de su bottom-up. Hasta junio 2026 eran
-# 5.650 al mes; desde julio, 22.650:
-#   2.825 + 1.412,5 + 1.412,5 + 8.500 + 4.250 + 4.250  (24-ago-2026)
+# 5.650 al mes; desde julio, los seis pagos de abajo (24-ago-2026, de la
+# formula de su cash management). El mensual es LA SUMA del detalle: para
+# cambiar la cifra se cambia la linea que toca, no un total suelto.
+# Los conceptos son placeholder: ponles nombre cuando quieras.
 # Lo ya pagado del mes se descuenta por el diario (cuentas 551-553) o por
 # los patrones de ejecutado.contingente.
 contingente_socios:
-  mensual: 22650
+  detalle:
+    - { concepto: "Pago contingente a socios 1", importe: 2825 }
+    - { concepto: "Pago contingente a socios 2", importe: 1412.5 }
+    - { concepto: "Pago contingente a socios 3", importe: 1412.5 }
+    - { concepto: "Pago contingente a socios 4", importe: 8500 }
+    - { concepto: "Pago contingente a socios 5", importe: 4250 }
+    - { concepto: "Pago contingente a socios 6", importe: 4250 }
 
 # ---------------------------------------------------------------------------
 # 2. GASTOS RECURRENTES A PROYECTAR CUANDO NO HAY FACTURA EN HOLDED

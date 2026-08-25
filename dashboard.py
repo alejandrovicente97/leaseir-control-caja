@@ -440,21 +440,52 @@ def pantalla_nacho(rn, fc, meta):
         + _tabla_fin(rn.get("detalle_deuda") or [],
                      "sin pagos de deuda apuntados este mes")
         + "<h4>Pólizas: variación del dispuesto (extracto)</h4>"
-        + tabla(["Póliza", "Importe"],
-                [[esc(x["cuenta"]), cifra(x["importe"])]
-                 for x in (rn.get("detalle_polizas") or [])] or
-                [["<i>sin movimiento en las pólizas este mes</i>", ""]],
-                alineacion=["", "r"])
+        + ("".join(
+            # el cuadre entero, no la cifra suelta: dispuesto al empezar el
+            # mes, cada movimiento del feed con fecha y concepto, y el
+            # dispuesto de hoy (limite de config menos saldo del listado)
+            (f'<p class="nn"><b>{esc(x["cuenta"])}</b>'
+             + (f' · dispuesto día 1: {eur(x["dispuesto_inicio"])} → '
+                f'hoy: {eur(x["dispuesto_hoy"])} · '
+                f'{"devuelto" if x["importe"] < 0 else "dispuesto de más"}: '
+                f'{eur(abs(x["importe"]))}'
+                if x.get("dispuesto_hoy") is not None else
+                f' · variación del mes {cifra(x["importe"])}')
+             + '</p>'
+             + (tabla(["Fecha", "Concepto en el banco", "Importe"],
+                      [[esc(m_["fecha"]), esc(m_["concepto"]),
+                        cifra(m_["importe"])] for m_ in x["movs"]]
+                      + [["", "<b>Neto del mes (+ = se devuelve dispuesto)"
+                          "</b>", f'<b>{cifra(-x["importe"])}</b>']],
+                      alineacion=["", "", "r"],
+                      clases=[""] * len(x["movs"]) + ["total"])
+                if x.get("movs") else ""))
+            for x in (rn.get("detalle_polizas") or []))
+           or '<p class="nn"><i>sin movimiento en las pólizas este mes</i></p>')
         + '<p class="nn">Negativo = se devuelve dispuesto (pago de deuda); '
           'positivo = se dispone crédito. Sale del extracto de la póliza, '
           'no del diario: es la fila de <i>Debt Repayment</i> de tu '
-          'cash management.</p>'
+          'cash management, comprobable contra el saldo del listado y el '
+          'límite confirmado en config.</p>'
         + "<h4>Distribuciones (dividendos)</h4>"
         + _tabla_fin(rn.get("detalle_distribuciones") or [],
                      "sin distribuciones este mes")
         + "<h4>Pagos a socios (contingente)</h4>"
         + _tabla_fin(rn.get("detalle_socios") or [],
                      "sin pagos a socios apuntados este mes")
+        + ((lambda det_c: (
+            # con decimales cuando los hay (1.412,50): si el lector suma las
+            # lineas tiene que salirle el total al centimo, no "casi"
+            tabla(["Previsto del mes", "Importe"],
+                  [[esc(x["concepto"]),
+                    f'<span class="neg">'
+                    f'{eur(x["importe"], 0 if float(x["importe"]).is_integer() else 2)}'
+                    f'</span>'] for x in det_c]
+                  + [["<b>Total mensual</b>",
+                      f'<b>{cifra(sum(x["importe"] for x in det_c))}</b>']],
+                  alineacion=["", "r"],
+                  clases=[""] * len(det_c) + ["total"])
+            if det_c else ""))((fc.get("detalle") or {}).get("contingente") or []))
         + (f'<p class="nn">Del contingente mensual quedan '
            f'{eur(abs(rn.get("contingente_pdte", 0)))} previstos y no '
            f'pagados: restan al cierre proyectado, no al unlevered.</p>'
